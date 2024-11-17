@@ -1,0 +1,490 @@
+﻿diff --git a/src/main/java/org/prebid/server/analytics/model/NotificationEvent.java b/src/main/java/org/prebid/server/analytics/model/NotificationEvent.java
+index 9bbfdc888..b360a75ad 100644
+--- a/src/main/java/org/prebid/server/analytics/model/NotificationEvent.java
++++ b/src/main/java/org/prebid/server/analytics/model/NotificationEvent.java
+@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
+ import lombok.Builder;
+ import lombok.Value;
+ import org.prebid.server.activity.infrastructure.ActivityInfrastructure;
++import org.prebid.server.events.EventRequest;
+ import org.prebid.server.model.HttpRequestContext;
+ import org.prebid.server.settings.model.Account;
+ 
+@@ -28,6 +29,8 @@ public class NotificationEvent {
+ 
+     HttpRequestContext httpContext;
+ 
++    EventRequest eventRequest;
++
+     @JsonIgnore
+     ActivityInfrastructure activityInfrastructure;
+ 
+diff --git a/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java b/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java
+new file mode 100644
+index 000000000..aa4c13fed
+--- /dev/null
++++ b/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java
+@@ -0,0 +1,82 @@
++package org.prebid.server.analytics.reporter.bids;
++
++import com.fasterxml.jackson.core.JsonProcessingException;
++import com.fasterxml.jackson.databind.JsonNode;
++import io.vertx.core.Future;
++import org.prebid.server.analytics.AnalyticsReporter;
++import org.prebid.server.analytics.model.AmpEvent;
++import org.prebid.server.analytics.model.AuctionEvent;
++import org.prebid.server.analytics.model.CookieSyncEvent;
++import org.prebid.server.analytics.model.NotificationEvent;
++import org.prebid.server.analytics.model.SetuidEvent;
++import org.prebid.server.analytics.model.VideoEvent;
++import org.prebid.server.analytics.reporter.log.model.LogEvent;
++import org.prebid.server.events.EventRequest;
++import org.prebid.server.json.JacksonMapper;
++import org.prebid.server.log.Logger;
++import org.prebid.server.log.LoggerFactory;
++
++import java.math.RoundingMode;
++import java.util.Objects;
++
++/**
++ * {@link AnalyticsReporter} implementation that writes application events to a log, for illustration purpose only.
++ */
++public class BidsAnalyticsReporter implements AnalyticsReporter {
++
++    public static final Logger logger = LoggerFactory.getLogger("ANALYTICS");
++
++    private final JacksonMapper mapper;
++
++    public BidsAnalyticsReporter(JacksonMapper mapper) {
++        this.mapper = Objects.requireNonNull(mapper);
++    }
++
++    @Override
++    public <T> Future<Void> processEvent(T event) {
++
++        final LogEvent<?> logEvent = switch (event) {
++            case AmpEvent ampEvent -> LogEvent.of("/openrtb2/amp", ampEvent.getBidResponse());
++            case AuctionEvent auctionEvent -> LogEvent.of("/openrtb2/auction", auctionEvent.getBidResponse());
++            case CookieSyncEvent cookieSyncEvent -> LogEvent.of("/cookie_sync", cookieSyncEvent.getBidderStatus());
++            case NotificationEvent notificationEvent ->
++                LogEvent.of(notificationEvent.getType().name(), getEventData(notificationEvent));
++            case SetuidEvent setuidEvent -> LogEvent.of(
++                    "/setuid",
++                    setuidEvent.getBidder() + ":" + setuidEvent.getUid() + ":" + setuidEvent.getSuccess());
++            case VideoEvent videoEvent -> LogEvent.of("/openrtb2/video", videoEvent.getBidResponse());
++            case null, default -> LogEvent.of("unknown", null);
++        };
++
++        if (logEvent.getType().equals("win") || logEvent.getType().equals("imp")) {
++            logger.info(mapper.encodeToString(logEvent));
++        }
++
++        return Future.succeededFuture();
++    }
++
++    private JsonNode getEventData(NotificationEvent notificationEvent) {
++        final EventRequest eventReq = notificationEvent.getEventRequest();
++        try {
++            return mapper.mapper().readTree("{\"account\":\"" + eventReq.getAccountId()
++                    + "\",\"price\":\"" + eventReq.getPrice().setScale(5, RoundingMode.HALF_DOWN)
++                    .stripTrailingZeros().toPlainString()
++                    + "\",\"url\":\"" + eventReq.getUrl().replace("\"", "\\\"")
++                    + "\",\"impId\":\"" + eventReq.getImpId().replace("\"", "\\\"")
++                    + "\",\"auctionId\":\"" + eventReq.getAuctionId().replace("\"", "\\\"") + "\"}");
++        } catch (JsonProcessingException e) {
++            logger.error("Bids log adapter failed to parse JSON.");
++        }
++        return mapper.mapper().nullNode();
++    }
++
++    @Override
++    public int vendorId() {
++        return 0;
++    }
++
++    @Override
++    public String name() {
++        return "bidsAnalytics";
++    }
++}
+diff --git a/src/main/java/org/prebid/server/analytics/reporter/bids/model/LogEvent.java b/src/main/java/org/prebid/server/analytics/reporter/bids/model/LogEvent.java
+new file mode 100644
+index 000000000..8440ed332
+--- /dev/null
++++ b/src/main/java/org/prebid/server/analytics/reporter/bids/model/LogEvent.java
+@@ -0,0 +1,13 @@
++package org.prebid.server.analytics.reporter.bids.model;
++
++import com.fasterxml.jackson.annotation.JsonUnwrapped;
++import lombok.Value;
++
++@Value(staticConstructor = "of")
++public class LogEvent<T> {
++
++    String type;
++
++    @JsonUnwrapped
++    T event;
++}
+diff --git a/src/main/java/org/prebid/server/auction/BidResponseCreator.java b/src/main/java/org/prebid/server/auction/BidResponseCreator.java
+index 31ed4ee14..a2009d76a 100644
+--- a/src/main/java/org/prebid/server/auction/BidResponseCreator.java
++++ b/src/main/java/org/prebid/server/auction/BidResponseCreator.java
+@@ -292,6 +292,9 @@ public class BidResponseCreator {
+                         bid,
+                         bidType,
+                         bidder,
++                        bid.getPrice(),
++                        auctionContext.getBidRequest().getSite().getPage(),
++                        bid.getImpid(),
+                         account,
+                         videoStoredDataResult,
+                         eventsContext,
+@@ -324,6 +327,9 @@ public class BidResponseCreator {
+     private ObjectNode updateBidExt(Bid bid,
+                                     BidType bidType,
+                                     String bidder,
++                                    BigDecimal price,
++                                    String url,
++                                    String impId,
+                                     Account account,
+                                     VideoStoredDataResult videoStoredDataResult,
+                                     EventsContext eventsContext,
+@@ -334,6 +340,9 @@ public class BidResponseCreator {
+                 bid,
+                 bidType,
+                 bidder,
++                price,
++                url,
++                impId,
+                 account,
+                 videoStoredDataResult,
+                 eventsContext,
+@@ -355,6 +364,9 @@ public class BidResponseCreator {
+     private ExtBidPrebid updateBidExtPrebid(Bid bid,
+                                             BidType bidType,
+                                             String bidder,
++                                            BigDecimal price,
++                                            String url,
++                                            String impId,
+                                             Account account,
+                                             VideoStoredDataResult videoStoredDataResult,
+                                             EventsContext eventsContext,
+@@ -362,7 +374,7 @@ public class BidResponseCreator {
+                                             String effectiveBidId) {
+ 
+         final Video storedVideo = videoStoredDataResult.getImpIdToStoredVideo().get(bid.getImpid());
+-        final Events events = createEvents(bidder, account, effectiveBidId, eventsContext);
++        final Events events = createEvents(bidder, price, url, impId, account, effectiveBidId, eventsContext);
+         final ExtBidPrebidVideo extBidPrebidVideo = getExtBidPrebidVideo(bid.getExt()).orElse(null);
+ 
+         final ExtBidPrebid.ExtBidPrebidBuilder extBidPrebidBuilder = getExtPrebid(bid.getExt(), ExtBidPrebid.class)
+@@ -1538,6 +1550,9 @@ public class BidResponseCreator {
+     }
+ 
+     private Events createEvents(String bidder,
++                                BigDecimal price,
++                                String url,
++                                String impId,
+                                 Account account,
+                                 String bidId,
+                                 EventsContext eventsContext) {
+@@ -1546,6 +1561,9 @@ public class BidResponseCreator {
+                 ? eventsService.createEvent(
+                 bidId,
+                 bidder,
++                price,
++                url,
++                impId,
+                 account.getId(),
+                 true,
+                 eventsContext)
+diff --git a/src/main/java/org/prebid/server/events/EventRequest.java b/src/main/java/org/prebid/server/events/EventRequest.java
+index 64e430e39..324eb72a5 100644
+--- a/src/main/java/org/prebid/server/events/EventRequest.java
++++ b/src/main/java/org/prebid/server/events/EventRequest.java
+@@ -3,6 +3,8 @@ package org.prebid.server.events;
+ import lombok.Builder;
+ import lombok.Value;
+ 
++import java.math.BigDecimal;
++
+ /**
+  * Represents event request.
+  */
+@@ -28,6 +30,12 @@ public class EventRequest {
+ 
+     Analytics analytics;
+ 
++    BigDecimal price;
++
++    String url;
++
++    String impId;
++
+     public enum Type {
+ 
+         win, imp
+diff --git a/src/main/java/org/prebid/server/events/EventUtil.java b/src/main/java/org/prebid/server/events/EventUtil.java
+index 864892e67..559467d67 100644
+--- a/src/main/java/org/prebid/server/events/EventUtil.java
++++ b/src/main/java/org/prebid/server/events/EventUtil.java
+@@ -4,7 +4,10 @@ import io.vertx.core.MultiMap;
+ import io.vertx.ext.web.RoutingContext;
+ import org.apache.commons.lang3.ObjectUtils;
+ import org.apache.commons.lang3.StringUtils;
++import org.prebid.server.util.HttpUtil;
+ 
++import java.math.BigDecimal;
++import java.math.RoundingMode;
+ import java.util.Objects;
+ 
+ public class EventUtil {
+@@ -114,7 +117,6 @@ public class EventUtil {
+ 
+     public static EventRequest from(RoutingContext routingContext) {
+         final MultiMap queryParams = routingContext.request().params();
+-
+         final String typeAsString = queryParams.get(TYPE_PARAMETER);
+         final EventRequest.Type type = typeAsString.equals(WIN_TYPE) ? EventRequest.Type.win : EventRequest.Type.imp;
+ 
+@@ -128,6 +130,14 @@ public class EventUtil {
+         final String timestampAsString = StringUtils.stripToNull(queryParams.get(TIMESTAMP_PARAMETER));
+         final Long timestamp = timestampAsString != null ? Long.valueOf(timestampAsString) : null;
+ 
++        final String priceAsString = StringUtils.stripToNull(queryParams.get("p"));
++        BigDecimal price = null;
++        try {
++            price = priceAsString != null ? BigDecimal.valueOf(Double.parseDouble(priceAsString)) : null;
++        } catch (NumberFormatException e) {
++            //fail silently
++        }
++
+         final String auctionId = StringUtils.stripToNull(queryParams.get(AUCTION_ID));
+ 
+         return EventRequest.builder()
+@@ -136,6 +146,9 @@ public class EventUtil {
+                 .auctionId(auctionId)
+                 .accountId(queryParams.get(ACCOUNT_ID_PARAMETER))
+                 .bidder(queryParams.get(BIDDER_PARAMETER))
++                .price(price)
++                .url(queryParams.get("u"))
++                .impId(queryParams.get("c"))
+                 .timestamp(timestamp)
+                 .format(format)
+                 .analytics(analytics)
+@@ -171,6 +184,22 @@ public class EventUtil {
+             result.append(nameValueAsQueryString(BIDDER_PARAMETER, eventRequest.getBidder()));
+         }
+ 
++        // price
++        if (eventRequest.getPrice() != null) {
++            result.append(nameValueAsQueryString("p", eventRequest.getPrice()
++                    .setScale(5, RoundingMode.HALF_DOWN).stripTrailingZeros().toPlainString()));
++        }
++
++        // url
++        if (StringUtils.isNotEmpty(eventRequest.getUrl())) {
++            result.append(nameValueAsQueryString("u", HttpUtil.encodeUrl(eventRequest.getUrl())));
++        }
++
++        // tag ID
++        if (StringUtils.isNotEmpty(eventRequest.getImpId())) {
++            result.append(nameValueAsQueryString("c", HttpUtil.encodeUrl(eventRequest.getImpId())));
++        }
++
+         // format
+         if (eventRequest.getFormat() == EventRequest.Format.blank) {
+             result.append(nameValueAsQueryString(FORMAT_PARAMETER, BLANK_FORMAT));
+diff --git a/src/main/java/org/prebid/server/events/EventsService.java b/src/main/java/org/prebid/server/events/EventsService.java
+index 819dfeb0e..eec4a24e7 100644
+--- a/src/main/java/org/prebid/server/events/EventsService.java
++++ b/src/main/java/org/prebid/server/events/EventsService.java
+@@ -3,14 +3,17 @@ package org.prebid.server.events;
+ import org.prebid.server.proto.openrtb.ext.response.Events;
+ import org.prebid.server.util.HttpUtil;
+ 
++import java.math.BigDecimal;
+ import java.util.Objects;
+ 
+ public class EventsService {
+ 
+     private final String externalUrl;
++    private final boolean extendedEvents;
+ 
+     public EventsService(String externalUrl) {
+         this.externalUrl = HttpUtil.validateUrl(Objects.requireNonNull(externalUrl));
++        this.extendedEvents = this.externalUrl.contains("bids.ws");
+     }
+ 
+     /**
+@@ -27,6 +30,9 @@ public class EventsService {
+                         EventRequest.Type.win,
+                         bidId,
+                         bidder,
++                        null,
++                        null,
++                        null,
+                         accountId,
+                         analytics(analyticsEnabled),
+                         EventRequest.Format.image,
+@@ -35,17 +41,82 @@ public class EventsService {
+                         EventRequest.Type.imp,
+                         bidId,
+                         bidder,
++                        null,
++                        null,
++                        null,
+                         accountId,
+                         analytics(analyticsEnabled),
+                         EventRequest.Format.image,
+                         eventsContext));
+     }
+ 
++    /**
++     * Returns {@link Events} object based on given params.
++     */
++    public Events createEvent(String bidId,
++                              String bidder,
++                              BigDecimal price,
++                              String url,
++                              String impId,
++                              String accountId,
++                              boolean analyticsEnabled,
++                              EventsContext eventsContext) {
++
++        return Events.of(
++                eventUrl(
++                        EventRequest.Type.win,
++                        bidId,
++                        bidder,
++                        extendedEvents ? price : null,
++                        extendedEvents ? url : null,
++                        extendedEvents ? impId : null,
++                        accountId,
++                        analytics(analyticsEnabled),
++                        EventRequest.Format.image,
++                        eventsContext),
++                eventUrl(
++                        EventRequest.Type.imp,
++                        bidId,
++                        bidder,
++                        extendedEvents ? price : null,
++                        extendedEvents ? url : null,
++                        extendedEvents ? impId : null,
++                        accountId,
++                        analytics(analyticsEnabled),
++                        EventRequest.Format.image,
++                        eventsContext));
++    }
++
++    /**
++     * Returns url for win tracking.
++     */
++    public String winUrl(String bidId,
++                         String bidder,
++                         String accountId,
++                         boolean analyticsEnabled,
++                         EventsContext eventsContext) {
++
++        return eventUrl(
++                EventRequest.Type.win,
++                bidId,
++                bidder,
++                null,
++                null,
++                null,
++                accountId,
++                analytics(analyticsEnabled),
++                EventRequest.Format.image,
++                eventsContext);
++    }
++
+     /**
+      * Returns url for win tracking.
+      */
+     public String winUrl(String bidId,
+                          String bidder,
++                         BigDecimal price,
++                         String url,
++                         String impId,
+                          String accountId,
+                          boolean analyticsEnabled,
+                          EventsContext eventsContext) {
+@@ -54,6 +125,9 @@ public class EventsService {
+                 EventRequest.Type.win,
+                 bidId,
+                 bidder,
++                extendedEvents ? price : null,
++                extendedEvents ? url : null,
++                extendedEvents ? impId : null,
+                 accountId,
+                 analytics(analyticsEnabled),
+                 EventRequest.Format.image,
+@@ -71,6 +145,9 @@ public class EventsService {
+         return eventUrl(EventRequest.Type.imp,
+                 bidId,
+                 bidder,
++                null,
++                null,
++                null,
+                 accountId,
+                 null,
+                 EventRequest.Format.blank,
+@@ -80,6 +157,9 @@ public class EventsService {
+     private String eventUrl(EventRequest.Type type,
+                             String bidId,
+                             String bidder,
++                            BigDecimal price,
++                            String url,
++                            String impId,
+                             String accountId,
+                             EventRequest.Analytics analytics,
+                             EventRequest.Format format,
+@@ -91,6 +171,9 @@ public class EventsService {
+                 .auctionId(eventsContext.getAuctionId())
+                 .accountId(accountId)
+                 .bidder(bidder)
++                .price(price)
++                .url(url)
++                .impId(impId)
+                 .timestamp(eventsContext.getAuctionTimestamp())
+                 .format(format)
+                 .integration(eventsContext.getIntegration())
+diff --git a/src/main/java/org/prebid/server/handler/NotificationEventHandler.java b/src/main/java/org/prebid/server/handler/NotificationEventHandler.java
+index 60e11195c..1da6163de 100644
+--- a/src/main/java/org/prebid/server/handler/NotificationEventHandler.java
++++ b/src/main/java/org/prebid/server/handler/NotificationEventHandler.java
+@@ -160,6 +160,7 @@ public class NotificationEventHandler implements ApplicationResource {
+                     .timestamp(eventRequest.getTimestamp())
+                     .integration(eventRequest.getIntegration())
+                     .httpContext(HttpRequestContext.from(routingContext))
++                    .eventRequest(EventUtil.from(routingContext))
+                     .activityInfrastructure(activityInfrastructure(account))
+                     .build();
+ 
+diff --git a/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java b/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java
+index d618c36fa..8844bfe8b 100644
+--- a/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java
++++ b/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java
+@@ -10,6 +10,7 @@ import org.prebid.server.analytics.AnalyticsReporter;
+ import org.prebid.server.analytics.reporter.AnalyticsReporterDelegator;
+ import org.prebid.server.analytics.reporter.agma.AgmaAnalyticsReporter;
+ import org.prebid.server.analytics.reporter.agma.model.AgmaAnalyticsProperties;
++import org.prebid.server.analytics.reporter.bids.BidsAnalyticsReporter;
+ import org.prebid.server.analytics.reporter.greenbids.GreenbidsAnalyticsReporter;
+ import org.prebid.server.analytics.reporter.greenbids.model.GreenbidsAnalyticsProperties;
+ import org.prebid.server.analytics.reporter.log.LogAnalyticsReporter;
+@@ -68,6 +69,12 @@ public class AnalyticsConfiguration {
+         return new LogAnalyticsReporter(mapper);
+     }
+ 
++    @Bean
++    @ConditionalOnProperty(prefix = "analytics.bids", name = "enabled", havingValue = "true")
++    BidsAnalyticsReporter bidsAnalyticsReporter(JacksonMapper mapper) {
++        return new BidsAnalyticsReporter(mapper);
++    }
++
+     @Configuration
+     @ConditionalOnProperty(prefix = "analytics.agma", name = "enabled", havingValue = "true")
+     public static class AgmaAnalyticsConfiguration {

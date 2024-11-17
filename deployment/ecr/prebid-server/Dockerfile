@@ -27,12 +27,18 @@ RUN git clone --single-branch --branch master https://github.com/prebid/prebid-s
 # Copy source build configuration file
 COPY docker-build-config.json docker-build-config.json
 
+#BIDS: copy diff file
+COPY bids.diff prebid-server-java/
+
 # Set the working directory to the cloned repository
 WORKDIR /prebid-server-java
 
 # Fetch tags and checkout the specified version
 RUN git fetch origin --tags
 RUN git checkout $(jq -r .GIT_TAG_VERSION ../docker-build-config.json)
+
+#BIDS: apply diff
+RUN git apply --ignore-space-change --ignore-whitespace bids.diff
 
 # Build the Prebid Server Java application using Maven
 RUN mvn clean package $(jq -r .MVN_CLI_OPTIONS ../docker-build-config.json)
