@@ -46,6 +46,11 @@ RUN mvn clean package $(jq -r .MVN_CLI_OPTIONS ../docker-build-config.json)
 # Remove the local Maven repository to reduce image size
 RUN rm -rf /root/.m2
 
+#BIDS: copy maxmind file
+RUN yum -y install wget
+RUN mkdir /var/tmp/prebid
+RUN wget -O /var/tmp/prebid/GeoLite2-City.tar.gz "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=<<key>>&suffix=tar.gz"
+
 # Expose ports for the Prebid Server Java application
 EXPOSE 8080 8060
 

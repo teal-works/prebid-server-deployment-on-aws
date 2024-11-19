@@ -21,13 +21,14 @@ index 9bbfdc888..b360a75ad 100644
  
 diff --git a/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java b/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java
 new file mode 100644
-index 000000000..aa4c13fed
+index 000000000..294fc6935
 --- /dev/null
 +++ b/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,85 @@
 +package org.prebid.server.analytics.reporter.bids;
 +
 +import com.fasterxml.jackson.core.JsonProcessingException;
++import com.fasterxml.jackson.core.io.JsonStringEncoder;
 +import com.fasterxml.jackson.databind.JsonNode;
 +import io.vertx.core.Future;
 +import org.prebid.server.analytics.AnalyticsReporter;
@@ -54,9 +55,11 @@ index 000000000..aa4c13fed
 +    public static final Logger logger = LoggerFactory.getLogger("ANALYTICS");
 +
 +    private final JacksonMapper mapper;
++    private final JsonStringEncoder encoder;
 +
 +    public BidsAnalyticsReporter(JacksonMapper mapper) {
 +        this.mapper = Objects.requireNonNull(mapper);
++        this.encoder = JsonStringEncoder.getInstance();
 +    }
 +
 +    @Override
@@ -76,7 +79,7 @@ index 000000000..aa4c13fed
 +        };
 +
 +        if (logEvent.getType().equals("win") || logEvent.getType().equals("imp")) {
-+            logger.info(mapper.encodeToString(logEvent));
++            logger.info(new String(encoder.quoteAsString(mapper.encodeToString(logEvent))));
 +        }
 +
 +        return Future.succeededFuture();
@@ -88,9 +91,9 @@ index 000000000..aa4c13fed
 +            return mapper.mapper().readTree("{\"account\":\"" + eventReq.getAccountId()
 +                    + "\",\"price\":\"" + eventReq.getPrice().setScale(5, RoundingMode.HALF_DOWN)
 +                    .stripTrailingZeros().toPlainString()
-+                    + "\",\"url\":\"" + eventReq.getUrl().replace("\"", "\\\"")
-+                    + "\",\"impId\":\"" + eventReq.getImpId().replace("\"", "\\\"")
-+                    + "\",\"auctionId\":\"" + eventReq.getAuctionId().replace("\"", "\\\"") + "\"}");
++                    + "\",\"url\":\"" + new String(encoder.quoteAsString(eventReq.getUrl()))
++                    + "\",\"impId\":\"" + new String(encoder.quoteAsString(eventReq.getImpId()))
++                    + "\",\"auctionId\":\"" + new String(encoder.quoteAsString(eventReq.getAuctionId())) + "\"}");
 +        } catch (JsonProcessingException e) {
 +            logger.error("Bids log adapter failed to parse JSON.");
 +        }
