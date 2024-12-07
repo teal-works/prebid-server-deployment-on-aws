@@ -24,7 +24,7 @@ new file mode 100644
 index 000000000..294fc6935
 --- /dev/null
 +++ b/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,85 @@
 +package org.prebid.server.analytics.reporter.bids;
 +
 +import com.fasterxml.jackson.core.JsonProcessingException;
@@ -89,7 +89,6 @@ index 000000000..294fc6935
 +        final EventRequest eventReq = notificationEvent.getEventRequest();
 +        try {
 +            return mapper.mapper().readTree("{\"account\":\"" + eventReq.getAccountId()
-+                    + "\",\"bidder\":\"" + new String(encoder.quoteAsString(eventReq.getBidder()))
 +                    + "\",\"price\":\"" + eventReq.getPrice().setScale(5, RoundingMode.HALF_DOWN)
 +                    .stripTrailingZeros().toPlainString()
 +                    + "\",\"url\":\"" + new String(encoder.quoteAsString(eventReq.getUrl()))
