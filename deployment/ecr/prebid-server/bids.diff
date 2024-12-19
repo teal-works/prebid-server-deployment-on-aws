@@ -21,10 +21,10 @@ index 9bbfdc888..b360a75ad 100644
  
 diff --git a/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java b/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java
 new file mode 100644
-index 000000000..294fc6935
+index 000000000..00e1688b6
 --- /dev/null
 +++ b/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,92 @@
 +package org.prebid.server.analytics.reporter.bids;
 +
 +import com.fasterxml.jackson.core.JsonProcessingException;
@@ -88,12 +88,19 @@ index 000000000..294fc6935
 +    private JsonNode getEventData(NotificationEvent notificationEvent) {
 +        final EventRequest eventReq = notificationEvent.getEventRequest();
 +        try {
-+            return mapper.mapper().readTree("{\"account\":\"" + eventReq.getAccountId()
-+                    + "\",\"price\":\"" + eventReq.getPrice().setScale(5, RoundingMode.HALF_DOWN)
-+                    .stripTrailingZeros().toPlainString()
-+                    + "\",\"url\":\"" + new String(encoder.quoteAsString(eventReq.getUrl()))
-+                    + "\",\"impId\":\"" + new String(encoder.quoteAsString(eventReq.getImpId()))
-+                    + "\",\"auctionId\":\"" + new String(encoder.quoteAsString(eventReq.getAuctionId())) + "\"}");
++            return mapper.mapper().readTree("{\"account\":\""
++                    + (eventReq.getAccountId() != null ? eventReq.getAccountId() : "")
++                    + "\",\"bidder\":\"" + (eventReq.getBidder() != null
++                    ? new String(encoder.quoteAsString(eventReq.getBidder())) : "")
++                    + "\",\"price\":\"" + (eventReq.getPrice() != null
++                    ? eventReq.getPrice().setScale(5, RoundingMode.HALF_DOWN)
++                    .stripTrailingZeros().toPlainString() : "")
++                    + "\",\"url\":\"" + (eventReq.getUrl() != null
++                    ? new String(encoder.quoteAsString(eventReq.getUrl())) : "")
++                    + "\",\"impId\":\"" + (eventReq.getImpId() != null
++                    ? new String(encoder.quoteAsString(eventReq.getImpId())) : "")
++                    + "\",\"auctionId\":\"" + (eventReq.getAuctionId() != null
++                    ? new String(encoder.quoteAsString(eventReq.getAuctionId())) : "") + "\"}");
 +        } catch (JsonProcessingException e) {
 +            logger.error("Bids log adapter failed to parse JSON.");
 +        }
@@ -130,10 +137,56 @@ index 000000000..8440ed332
 +    T event;
 +}
 diff --git a/src/main/java/org/prebid/server/auction/BidResponseCreator.java b/src/main/java/org/prebid/server/auction/BidResponseCreator.java
-index 31ed4ee14..a2009d76a 100644
+index 86fe28fdc..5166f3c85 100644
 --- a/src/main/java/org/prebid/server/auction/BidResponseCreator.java
 +++ b/src/main/java/org/prebid/server/auction/BidResponseCreator.java
-@@ -292,6 +292,9 @@ public class BidResponseCreator {
+@@ -42,6 +42,7 @@ import org.prebid.server.bidder.model.BidderBid;
+ import org.prebid.server.bidder.model.BidderError;
+ import org.prebid.server.bidder.model.BidderSeatBid;
+ import org.prebid.server.bidder.model.BidderSeatBidInfo;
++import org.prebid.server.bids.IIQ;
+ import org.prebid.server.cache.CoreCacheService;
+ import org.prebid.server.cache.model.CacheContext;
+ import org.prebid.server.cache.model.CacheInfo;
+@@ -207,21 +208,34 @@ public class BidResponseCreator {
+         return Future.succeededFuture(bidResponse);
+     }
+ 
++    Future<BidResponse> create(AuctionContext auctionContext,
++                               BidRequestCacheInfo cacheInfo,
++                               Map<String, MultiBidConfig> bidderToMultiBids,
++                               IIQ.State state) {
++
++        return videoStoredDataResult(auctionContext)
++                .compose(videoStoredData -> create(videoStoredData, auctionContext, cacheInfo,
++                        bidderToMultiBids, state))
++                .map(bidResponse -> populateSeatNonBid(auctionContext, bidResponse));
++    }
++
+     Future<BidResponse> create(AuctionContext auctionContext,
+                                BidRequestCacheInfo cacheInfo,
+                                Map<String, MultiBidConfig> bidderToMultiBids) {
+ 
+         return videoStoredDataResult(auctionContext)
+-                .compose(videoStoredData -> create(videoStoredData, auctionContext, cacheInfo, bidderToMultiBids))
++                .compose(videoStoredData -> create(videoStoredData, auctionContext, cacheInfo,
++                        bidderToMultiBids, null))
+                 .map(bidResponse -> populateSeatNonBid(auctionContext, bidResponse));
+     }
+ 
+     private Future<BidResponse> create(VideoStoredDataResult videoStoredDataResult,
+                                        AuctionContext auctionContext,
+                                        BidRequestCacheInfo cacheInfo,
+-                                       Map<String, MultiBidConfig> bidderToMultiBids) {
++                                       Map<String, MultiBidConfig> bidderToMultiBids,
++                                       IIQ.State state) {
+ 
+-        final EventsContext eventsContext = createEventsContext(auctionContext);
++        final EventsContext eventsContext = createEventsContext(auctionContext, state);
+ 
+         final List<BidderResponse> bidderResponses = auctionContext.getAuctionParticipations().stream()
+                 .filter(auctionParticipation -> !auctionParticipation.isRequestBlocked())
+@@ -296,6 +310,9 @@ public class BidResponseCreator {
                          bid,
                          bidType,
                          bidder,
@@ -143,7 +196,7 @@ index 31ed4ee14..a2009d76a 100644
                          account,
                          videoStoredDataResult,
                          eventsContext,
-@@ -324,6 +327,9 @@ public class BidResponseCreator {
+@@ -328,6 +345,9 @@ public class BidResponseCreator {
      private ObjectNode updateBidExt(Bid bid,
                                      BidType bidType,
                                      String bidder,
@@ -153,7 +206,7 @@ index 31ed4ee14..a2009d76a 100644
                                      Account account,
                                      VideoStoredDataResult videoStoredDataResult,
                                      EventsContext eventsContext,
-@@ -334,6 +340,9 @@ public class BidResponseCreator {
+@@ -338,6 +358,9 @@ public class BidResponseCreator {
                  bid,
                  bidType,
                  bidder,
@@ -163,7 +216,7 @@ index 31ed4ee14..a2009d76a 100644
                  account,
                  videoStoredDataResult,
                  eventsContext,
-@@ -355,6 +364,9 @@ public class BidResponseCreator {
+@@ -359,6 +382,9 @@ public class BidResponseCreator {
      private ExtBidPrebid updateBidExtPrebid(Bid bid,
                                              BidType bidType,
                                              String bidder,
@@ -173,16 +226,33 @@ index 31ed4ee14..a2009d76a 100644
                                              Account account,
                                              VideoStoredDataResult videoStoredDataResult,
                                              EventsContext eventsContext,
-@@ -362,7 +374,7 @@ public class BidResponseCreator {
+@@ -366,7 +392,8 @@ public class BidResponseCreator {
                                              String effectiveBidId) {
  
          final Video storedVideo = videoStoredDataResult.getImpIdToStoredVideo().get(bid.getImpid());
 -        final Events events = createEvents(bidder, account, effectiveBidId, eventsContext);
-+        final Events events = createEvents(bidder, price, url, impId, account, effectiveBidId, eventsContext);
++        final Events events = createEvents(bidder, price, url, impId,
++                account, effectiveBidId, eventsContext);
          final ExtBidPrebidVideo extBidPrebidVideo = getExtBidPrebidVideo(bid.getExt()).orElse(null);
  
          final ExtBidPrebid.ExtBidPrebidBuilder extBidPrebidBuilder = getExtPrebid(bid.getExt(), ExtBidPrebid.class)
-@@ -1538,6 +1550,9 @@ public class BidResponseCreator {
+@@ -1473,13 +1500,14 @@ public class BidResponseCreator {
+                 .orElse(com.iab.openrtb.request.Asset.EMPTY);
+     }
+ 
+-    private EventsContext createEventsContext(AuctionContext auctionContext) {
++    private EventsContext createEventsContext(AuctionContext auctionContext, IIQ.State state) {
+         return EventsContext.builder()
+                 .auctionId(auctionContext.getBidRequest().getId())
+                 .enabledForAccount(eventsEnabledForAccount(auctionContext))
+                 .enabledForRequest(eventsEnabledForRequest(auctionContext))
+                 .auctionTimestamp(auctionTimestamp(auctionContext))
+                 .integration(integrationFrom(auctionContext))
++                .state(state)
+                 .build();
+     }
+ 
+@@ -1554,6 +1582,9 @@ public class BidResponseCreator {
      }
  
      private Events createEvents(String bidder,
@@ -192,7 +262,7 @@ index 31ed4ee14..a2009d76a 100644
                                  Account account,
                                  String bidId,
                                  EventsContext eventsContext) {
-@@ -1546,6 +1561,9 @@ public class BidResponseCreator {
+@@ -1562,6 +1593,9 @@ public class BidResponseCreator {
                  ? eventsService.createEvent(
                  bidId,
                  bidder,
@@ -202,8 +272,588 @@ index 31ed4ee14..a2009d76a 100644
                  account.getId(),
                  true,
                  eventsContext)
+diff --git a/src/main/java/org/prebid/server/auction/ExchangeService.java b/src/main/java/org/prebid/server/auction/ExchangeService.java
+index c4b6dfd7a..e8a724193 100644
+--- a/src/main/java/org/prebid/server/auction/ExchangeService.java
++++ b/src/main/java/org/prebid/server/auction/ExchangeService.java
+@@ -54,6 +54,7 @@ import org.prebid.server.bidder.model.BidderBid;
+ import org.prebid.server.bidder.model.BidderError;
+ import org.prebid.server.bidder.model.BidderSeatBid;
+ import org.prebid.server.bidder.model.Price;
++import org.prebid.server.bids.IIQ;
+ import org.prebid.server.cookie.UidsCookie;
+ import org.prebid.server.exception.InvalidRequestException;
+ import org.prebid.server.exception.PreBidException;
+@@ -147,6 +148,7 @@ public class ExchangeService {
+     private final HttpInteractionLogger httpInteractionLogger;
+     private final PriceFloorAdjuster priceFloorAdjuster;
+     private final PriceFloorProcessor priceFloorProcessor;
++    private final IIQ iiq;
+     private final BidsAdjuster bidsAdjuster;
+     private final Metrics metrics;
+     private final Clock clock;
+@@ -174,6 +176,7 @@ public class ExchangeService {
+                            HttpInteractionLogger httpInteractionLogger,
+                            PriceFloorAdjuster priceFloorAdjuster,
+                            PriceFloorProcessor priceFloorProcessor,
++                           IIQ iiq,
+                            BidsAdjuster bidsAdjuster,
+                            Metrics metrics,
+                            Clock clock,
+@@ -201,6 +204,7 @@ public class ExchangeService {
+         this.httpInteractionLogger = Objects.requireNonNull(httpInteractionLogger);
+         this.priceFloorAdjuster = Objects.requireNonNull(priceFloorAdjuster);
+         this.priceFloorProcessor = Objects.requireNonNull(priceFloorProcessor);
++        this.iiq = Objects.requireNonNull(iiq);
+         this.bidsAdjuster = Objects.requireNonNull(bidsAdjuster);
+         this.metrics = Objects.requireNonNull(metrics);
+         this.clock = Objects.requireNonNull(clock);
+@@ -240,6 +244,8 @@ public class ExchangeService {
+         final Map<String, MultiBidConfig> bidderToMultiBid = bidderToMultiBids(bidRequest, debugWarnings);
+         receivedContext.getBidRejectionTrackers().putAll(makeBidRejectionTrackers(bidRequest, aliases));
+ 
++        final IIQ.State state = new IIQ.State("");
++
+         final boolean debugEnabled = receivedContext.getDebugContext().isDebugEnabled();
+         metrics.updateDebugRequestMetrics(debugEnabled);
+         metrics.updateAccountDebugRequestMetrics(account, debugEnabled);
+@@ -247,7 +253,8 @@ public class ExchangeService {
+         return storedResponseProcessor.getStoredResponseResult(bidRequest.getImp(), timeout)
+                 .map(storedResponseResult -> populateStoredResponse(storedResponseResult, storedAuctionResponses))
+                 .compose(storedResponseResult ->
+-                        extractAuctionParticipations(receivedContext, storedResponseResult, aliases, bidderToMultiBid)
++                        extractAuctionParticipations(receivedContext, storedResponseResult, aliases,
++                                bidderToMultiBid, state)
+                                 .map(receivedContext::with))
+ 
+                 .map(context -> updateRequestMetric(context, uidsCookie, aliases, account, requestTypeMetric))
+@@ -275,7 +282,7 @@ public class ExchangeService {
+                         .map(auctionParticipations -> updateResponsesMetrics(auctionParticipations, account, aliases))
+                         .map(context::with))
+                 // produce response from bidder results
+-                .compose(context -> bidResponseCreator.create(context, cacheInfo, bidderToMultiBid)
++                .compose(context -> bidResponseCreator.create(context, cacheInfo, bidderToMultiBid, state)
+                         .map(bidResponse -> criteriaLogManager.traceResponse(
+                                 logger,
+                                 bidResponse,
+@@ -429,7 +436,8 @@ public class ExchangeService {
+             AuctionContext context,
+             StoredResponseResult storedResponseResult,
+             BidderAliases aliases,
+-            Map<String, MultiBidConfig> bidderToMultiBid) {
++            Map<String, MultiBidConfig> bidderToMultiBid,
++            IIQ.State state) {
+ 
+         final List<Imp> imps = storedResponseResult.getRequiredRequestImps().stream()
+                 .filter(imp -> bidderParamsFromImpExt(imp.getExt()) != null)
+@@ -449,7 +457,8 @@ public class ExchangeService {
+                 aliases,
+                 impBidderToStoredBidResponse,
+                 imps,
+-                bidderToMultiBid);
++                bidderToMultiBid,
++                state);
+     }
+ 
+     private Set<String> bidderNamesFromImpExt(Imp imp, BidderAliases aliases) {
+@@ -484,7 +493,8 @@ public class ExchangeService {
+             BidderAliases aliases,
+             Map<String, Map<String, String>> impBidderToStoredResponse,
+             List<Imp> imps,
+-            Map<String, MultiBidConfig> bidderToMultiBid) {
++            Map<String, MultiBidConfig> bidderToMultiBid,
++            IIQ.State state) {
+ 
+         final BidRequest bidRequest = context.getBidRequest();
+         final ExtRequest requestExt = bidRequest.getExt();
+@@ -503,7 +513,8 @@ public class ExchangeService {
+                         bidderToMultiBid,
+                         biddersToConfigs,
+                         aliases,
+-                        context));
++                        context,
++                        state));
+     }
+ 
+     private Map<String, ExtBidderConfigOrtb> getBiddersToConfigs(ExtRequestPrebid prebid) {
+@@ -641,7 +652,8 @@ public class ExchangeService {
+             Map<String, MultiBidConfig> bidderToMultiBid,
+             Map<String, ExtBidderConfigOrtb> biddersToConfigs,
+             BidderAliases aliases,
+-            AuctionContext context) {
++            AuctionContext context,
++            IIQ.State state) {
+ 
+         final Map<String, JsonNode> bidderToPrebidBidders = bidderToPrebidBidders(bidRequest);
+         final List<AuctionParticipation> bidderRequests = bidderPrivacyResults.stream()
+@@ -656,7 +668,8 @@ public class ExchangeService {
+                         biddersToConfigs,
+                         bidderToPrebidBidders,
+                         aliases,
+-                        context))
++                        context,
++                        state))
+                 // Can't be removed after we prepare workflow to filter blocked
+                 .filter(auctionParticipation -> !auctionParticipation.isRequestBlocked())
+                 .collect(Collectors.toCollection(ArrayList::new));
+@@ -693,7 +706,8 @@ public class ExchangeService {
+             Map<String, ExtBidderConfigOrtb> biddersToConfigs,
+             Map<String, JsonNode> bidderToPrebidBidders,
+             BidderAliases bidderAliases,
+-            AuctionContext context) {
++            AuctionContext context,
++            IIQ.State state) {
+ 
+         final boolean blockedRequestByTcf = bidderPrivacyResult.isBlockedRequestByTcf();
+         final boolean blockedAnalyticsByTcf = bidderPrivacyResult.isBlockedAnalyticsByTcf();
+@@ -722,7 +736,8 @@ public class ExchangeService {
+                 biddersToConfigs,
+                 bidderToPrebidBidders,
+                 bidderAliases,
+-                context);
++                context,
++                state);
+ 
+         final BidderRequest bidderRequest = BidderRequest.builder()
+                 .bidder(bidder)
+@@ -749,7 +764,8 @@ public class ExchangeService {
+                                          Map<String, ExtBidderConfigOrtb> biddersToConfigs,
+                                          Map<String, JsonNode> bidderToPrebidBidders,
+                                          BidderAliases bidderAliases,
+-                                         AuctionContext context) {
++                                         AuctionContext context,
++                                         IIQ.State state) {
+ 
+         final String bidder = bidderPrivacyResult.getRequestBidder();
+         final BidRequest bidRequest = priceFloorProcessor.enrichWithPriceFloors(
+@@ -812,7 +828,7 @@ public class ExchangeService {
+                 bidderAliases,
+                 context.getDebugWarnings());
+ 
+-        return bidRequest.toBuilder()
++        return iiq.enrichWithIIQ(bidRequest.toBuilder()
+                 // User was already prepared above
+                 .user(bidderPrivacyResult.getUser())
+                 .device(bidderPrivacyResult.getDevice())
+@@ -822,7 +838,7 @@ public class ExchangeService {
+                 .site(isSite ? preparedSite : null)
+                 .source(prepareSource(bidder, bidRequest, transmitTid))
+                 .ext(prepareExt(bidder, bidderToPrebidBidders, bidderToMultiBid, bidRequest.getExt()))
+-                .build();
++                .build(), context.getHttpRequest(), state);
+     }
+ 
+     private static boolean transmitTransactionId(String bidder, AuctionContext context) {
+diff --git a/src/main/java/org/prebid/server/bids/IIQ.java b/src/main/java/org/prebid/server/bids/IIQ.java
+new file mode 100644
+index 000000000..b401e92cc
+--- /dev/null
++++ b/src/main/java/org/prebid/server/bids/IIQ.java
+@@ -0,0 +1,402 @@
++package org.prebid.server.bids;
++
++import com.fasterxml.jackson.core.JsonProcessingException;
++import com.fasterxml.jackson.core.type.TypeReference;
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectReader;
++import com.fasterxml.jackson.databind.node.ObjectNode;
++import com.github.benmanes.caffeine.cache.Cache;
++import com.github.benmanes.caffeine.cache.Caffeine;
++import com.github.benmanes.caffeine.cache.Expiry;
++import com.github.benmanes.caffeine.cache.Policy;
++import com.iab.openrtb.request.BidRequest;
++import com.iab.openrtb.request.Device;
++import com.iab.openrtb.request.Eid;
++import com.iab.openrtb.request.User;
++import inet.ipaddr.AddressStringException;
++import inet.ipaddr.IPAddress;
++import inet.ipaddr.IPAddressString;
++import io.netty.channel.ConnectTimeoutException;
++import io.vertx.core.Future;
++import io.vertx.core.impl.ConcurrentHashSet;
++import lombok.Setter;
++import lombok.Value;
++import lombok.experimental.NonFinal;
++import org.apache.commons.lang3.StringUtils;
++import org.apache.commons.lang3.exception.ExceptionUtils;
++import org.apache.http.HttpStatus;
++import org.checkerframework.checker.index.qual.NonNegative;
++import org.prebid.server.analytics.model.NotificationEvent;
++import org.prebid.server.auction.model.IpAddress;
++import org.prebid.server.auction.requestfactory.Ortb2ImplicitParametersResolver;
++import org.prebid.server.exception.PreBidException;
++import org.prebid.server.floors.proto.FetchStatus;
++import org.prebid.server.json.JacksonMapper;
++import org.prebid.server.log.Logger;
++import org.prebid.server.log.LoggerFactory;
++import org.prebid.server.model.HttpRequestContext;
++import org.prebid.server.util.HttpUtil;
++import org.prebid.server.vertx.httpclient.HttpClient;
++import org.prebid.server.vertx.httpclient.model.HttpClientResponse;
++
++import java.io.IOException;
++import java.math.BigDecimal;
++import java.time.Instant;
++import java.util.Arrays;
++import java.util.List;
++import java.util.ArrayList;
++import java.util.Objects;
++import java.util.Set;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.TimeoutException;
++
++public class IIQ {
++
++    private static final Logger logger = LoggerFactory.getLogger(IIQ.class);
++
++    private static final String URL_TEMPLATE =
++            "https://api.intentiq.com/profiles_engine/ProfilesEngineServlet?at=39&mi=10&dpi=1641699010&pt=17"
++                    + "&dpn=1&srvrReq=true&ip=[SOURCE_CLIENT_IPv4]&ipv6=[SOURCE_CLIENT_IPv6]"
++                    + "&uas=[URL_ENCODED_SOURCE_CLIENT_USER_AGENT]&pcid=[3RD_PARTY_ID]&ref=[DOMAIN]"
++                    + "&idtype=0&iiqidtype=2&iiqpcid=[1ST_PARTY_ID]&iiqpciddate=[1ST_PARTY_ID_EPOCH_CREATION_DATE]";
++    private static final String IMPRESSION_TEMPLATE =
++            "https://api.intentiq.com/profiles_engine/ProfilesEngineServlet?"
++                    + "at=45&dpi=1641699010&rtype=1&rdata=[IMPRESSION_DATA]";
++    private static final long MAX_TTL = 86400000L;
++    private static final List<String> COUNTRY_WHITELIST = Arrays.asList("USA", "CAN", "JPN", "AUS", "SGP", "KOR",
++            "THA", "MYS", "NZL", "MEX", "BRA");
++
++    private final HttpClient httpClient;
++    private final JacksonMapper mapper;
++    private final Ortb2ImplicitParametersResolver implicitParametersResolver;
++
++    private final Set<String> fetchInProgress;
++    private final Cache<String, ResponseCacheInfo> fetchedData;
++    private final Policy.VarExpiration cacheExpiration;
++
++    public IIQ(HttpClient httpClient,
++               JacksonMapper mapper,
++               Ortb2ImplicitParametersResolver implicitParametersResolver) {
++
++        this.httpClient = Objects.requireNonNull(httpClient);
++        this.mapper = Objects.requireNonNull(mapper);
++        this.implicitParametersResolver = Objects.requireNonNull(implicitParametersResolver);
++
++        fetchInProgress = new ConcurrentHashSet<>();
++        fetchedData = Caffeine.newBuilder()
++                .expireAfter(new Expiry<String, ResponseCacheInfo>() {
++                    @Override
++                    public long expireAfterCreate(String s, ResponseCacheInfo responseCacheInfo, long l) {
++                        return TimeUnit.MILLISECONDS.toNanos(
++                                responseCacheInfo.cacheTtl == null ? MAX_TTL : responseCacheInfo.cacheTtl);
++                    }
++
++                    @Override
++                    public long expireAfterUpdate(String s, ResponseCacheInfo responseCacheInfo,
++                                                  long l, @NonNegative long l1) {
++                        return l1;
++                    }
++
++                    @Override
++                    public long expireAfterRead(String s, ResponseCacheInfo responseCacheInfo,
++                                                long l, @NonNegative long l1) {
++                        return l1;
++                    }
++                })
++                .<String, ResponseCacheInfo>build();
++        cacheExpiration = fetchedData.policy().expireVariably().get();
++    }
++
++    private String getEndpointURL(Device device, String domain, String thirdPartyID, String firstPartyID,
++                                  String firstPartyCreationEPOC) {
++        return URL_TEMPLATE.replace("[SOURCE_CLIENT_IPv4]", device.getIp())
++                .replace("[SOURCE_CLIENT_IPv6]", device.getIpv6())
++                .replace("[URL_ENCODED_SOURCE_CLIENT_USER_AGENT]", HttpUtil.encodeUrl(device.getUa()))
++                .replace("[DOMAIN]", HttpUtil.encodeUrl(domain))
++                .replace("[3RD_PARTY_ID]", HttpUtil.encodeUrl(thirdPartyID))
++                .replace("[1ST_PARTY_ID]", HttpUtil.encodeUrl(firstPartyID))
++                .replace("[1ST_PARTY_ID_EPOCH_CREATION_DATE]", firstPartyCreationEPOC != null
++                        ? firstPartyCreationEPOC : String.valueOf(Instant.now().toEpochMilli()));
++    }
++
++    private JsonNode fetch(Device device, String domain, IDs ids) {
++        final String cacheKey = device.getIp() + device.getIpv6() + device.getUa();
++        final ResponseCacheInfo cachedData = fetchedData.asMap().get(cacheKey);
++
++        if (cachedData == null) {
++            fetchPriceFloorData(device, domain, ids.thirdPartyID, ids.firstPartyID,
++                    ids.firstPartyCreationEPOC, cacheKey);
++        } else {
++            return cachedData.data;
++        }
++
++        return null;
++    }
++
++    private void fetchPriceFloorData(Device device, String domain, String thirdPartyID,
++                                     String firstPartyID, String firstPartyCreationEPOC, String cacheKey) {
++        final String fetchUrl = getEndpointURL(device, domain, thirdPartyID, firstPartyID, firstPartyCreationEPOC);
++        if (!fetchInProgress.contains(cacheKey)) {
++            fetchPriceFloorDataAsynchronous(cacheKey, fetchUrl);
++        }
++    }
++
++    private void fetchPriceFloorDataAsynchronous(String cacheKey, String url) {
++        final long timeout = 5000L;
++
++        fetchInProgress.add(cacheKey);
++        //logger.info(url);
++        //final MultiMap headers = HttpUtil.headers();
++        //headers.set(HttpUtil.COOKIE_HEADER, "intentIQ=");
++        //httpClient.get(url, headers, timeout)
++        httpClient.get(url, timeout)
++                .map(response -> parseResponse(response, cacheKey))
++                .recover(this::recoverFromFailedFetching)
++                .map(this::updateCache);
++    }
++
++    private ResponseCacheInfo parseResponse(HttpClientResponse httpClientResponse, String cacheKey) {
++
++        final int statusCode = httpClientResponse.getStatusCode();
++        if (statusCode != HttpStatus.SC_OK) {
++            throw new PreBidException("Failed to request for IIQ with status %s"
++                    .formatted(statusCode));
++        }
++        final String body = httpClientResponse.getBody();
++        //logger.info(body);
++
++        if (StringUtils.isBlank(body)) {
++            throw new PreBidException(
++                    "Failed to parse IIQ response, response body can not be empty");
++        }
++
++        final JsonNode data = parseData(body);
++
++        long ttl = MAX_TTL;
++        if (data.get("cttl") != null) {
++            try {
++                ttl = Long.parseLong(data.get("cttl").asText());
++            } catch (NumberFormatException e) {
++                // fail silently
++            }
++        }
++
++        return ResponseCacheInfo.of(data,
++                FetchStatus.success,
++                ttl,
++                cacheKey);
++    }
++
++    private JsonNode parseData(String body) {
++        final JsonNode data;
++        try {
++            data = mapper.mapper().readTree(body);
++        } catch (JsonProcessingException e) {
++            throw new PreBidException("Failed to parse IIQ response: %s"
++                    .formatted(ExceptionUtils.getMessage(e)));
++        }
++        return data;
++    }
++
++    private Future<ResponseCacheInfo> recoverFromFailedFetching(Throwable throwable) {
++        final FetchStatus fetchStatus;
++        if (throwable instanceof TimeoutException || throwable instanceof ConnectTimeoutException) {
++            fetchStatus = FetchStatus.timeout;
++            logger.error("IIQ timeout.");
++        } else {
++            fetchStatus = FetchStatus.error;
++            logger.error(
++                    "Failed to fetch from IIQ endpoint, with a reason : %s "
++                            .formatted(throwable.getMessage()));
++        }
++
++        return Future.succeededFuture(ResponseCacheInfo.withStatus(fetchStatus));
++    }
++
++    private JsonNode updateCache(ResponseCacheInfo cacheInfo) {
++        final String cacheKey = cacheInfo.cacheKey;
++        if (cacheInfo.getFetchStatus() == FetchStatus.success || !fetchedData.asMap().containsKey(cacheKey)) {
++            cacheExpiration.put(cacheKey, cacheInfo, cacheInfo.cacheTtl, TimeUnit.MILLISECONDS);
++        }
++
++        fetchInProgress.remove(cacheKey);
++
++        return cacheInfo.data;
++    }
++
++    public BidRequest enrichWithIIQ(BidRequest bidRequest, HttpRequestContext request, State state) {
++        //TODO: redis 2nd level cache
++        final Device device = bidRequest.getDevice();
++        Device deviceWithIP = device == null ? Device.builder().build() : device;
++        if (device.getGeo() != null && device.getGeo().getCountry() != null
++                && COUNTRY_WHITELIST.contains(device.getGeo().getCountry())) {
++
++            final IpAddress ip = implicitParametersResolver.findIpFromRequest(request);
++            final IPAddressString addressString
++                    = new IPAddressString(ip == null ? request.getRemoteHost() : ip.getIp());
++            final IPAddress ipAddress;
++            try {
++                ipAddress = addressString.toAddress();
++            } catch (AddressStringException e) {
++                throw new PreBidException(
++                        "Failed to parse IP address for IIQ");
++            }
++            if (deviceWithIP.getIp() == null) {
++                deviceWithIP = deviceWithIP.toBuilder().ip(ipAddress.isIPv4() ? ipAddress.toString() : "").build();
++            }
++            if (deviceWithIP.getIpv6() == null) {
++                deviceWithIP = deviceWithIP.toBuilder().ipv6(ipAddress.isIPv6() ? ipAddress.toString() : "").build();
++            }
++            final String domain = bidRequest.getSite() != null && bidRequest.getSite().getDomain() != null
++                    ? bidRequest.getSite().getDomain() : "teal.works";
++
++            List<Eid> exisitingEuids = null;
++            if (bidRequest.getUser() != null) {
++                exisitingEuids = bidRequest.getUser().getEids();
++            }
++            final IDs ids = new IDs("", "", "", "");
++
++            if (exisitingEuids != null) {
++                exisitingEuids.forEach(id -> {
++                    if (Objects.equals(id.getSource(), "pubcid.org") || Objects.equals(id.getSource(), domain)) {
++                        ids.firstPartyID = id.getUids().getFirst().getId();
++                    } else if (Objects.equals(id.getSource(), "id5-sync.com")) {
++                        ids.id5 = id.getUids().getFirst().getId();
++                    } else {
++                        ids.thirdPartyID = id.getUids().getFirst().getId();
++                    }
++                });
++                if (!ids.id5.isEmpty()) {
++                    ids.thirdPartyID = ids.id5;
++                }
++                if (!ids.firstPartyID.isEmpty()) {
++                    ids.firstPartyCreationEPOC = String.valueOf(System.currentTimeMillis());
++                }
++            }
++            final JsonNode data = fetch(deviceWithIP, domain, ids);
++            if (data != null) {
++                if (data.get("data") != null && data.get("data").get("eids") != null) {
++                    final ObjectReader reader = mapper.mapper().readerFor(new TypeReference<List<Eid>>() {
++                    });
++                    try {
++                        final List<Eid> iiqEids = reader.readValue(data.get("data").get("eids"));
++                        final List<Eid> euids = new ArrayList<>();
++                        if (exisitingEuids != null) {
++                            exisitingEuids.forEach(id -> {
++                                euids.add(id);
++                                iiqEids.removeIf(e -> e.getSource().equals(id.getSource()));
++                            });
++                        }
++                        String abTestUuid = "";
++                        if (data.get("abTestUuid") != null) {
++                            abTestUuid = data.get("abTestUuid").asText();
++                            state.setAbTestUuid(abTestUuid);
++                        }
++                        if (iiqEids != null) {
++                            euids.addAll(iiqEids);
++                        }
++                        if (!euids.isEmpty()) {
++                            final User user = (bidRequest.getUser() == null
++                                    ? User.builder() : bidRequest.getUser().toBuilder())
++                                    .eids(euids).build();
++                            return bidRequest.toBuilder()
++                                    .user(user).build();
++                        }
++                    } catch (IOException e) {
++                        throw new PreBidException("Failed to parse IIQ eids");
++                    }
++                }
++
++            }
++        }
++        return bidRequest;
++    }
++
++    private String getImpressionURL(String ip, String ua, String bidder, BigDecimal cpm,
++                                    String domain, String abTestUuid) {
++        final ObjectNode node = mapper.mapper().createObjectNode();
++        node.put("bidderCode", bidder);
++        node.put("partnerId", "1641699010");
++        node.put("cpm", cpm);
++        node.put("currency", "USD");
++        node.put("biddingPlatformId", "4");
++        node.put("vrref", domain);
++        node.put("abTestUuid", abTestUuid);
++        node.put("ip", ip);
++        node.put("ua", ua);
++
++        return IMPRESSION_TEMPLATE.replace("[IMPRESSION_DATA]", HttpUtil.encodeUrl(node.toString()));
++    }
++
++    public void triggerImpressionAnalytics(NotificationEvent notificationEvent) {
++        if (notificationEvent.getEventRequest().getAbTestUuid() == null
++                || notificationEvent.getEventRequest().getAbTestUuid().isEmpty()) {
++            return;
++        }
++
++        final String userAgent = notificationEvent.getHttpContext().getHeaders().get(HttpUtil.USER_AGENT_HEADER);
++        final IpAddress ip = implicitParametersResolver.findIpFromRequest(notificationEvent.getHttpContext());
++        final IPAddressString addressString
++                = new IPAddressString(ip == null ? notificationEvent.getHttpContext().getRemoteHost() : ip.getIp());
++        final IPAddress ipAddress;
++        try {
++            ipAddress = addressString.toAddress();
++        } catch (AddressStringException e) {
++            throw new PreBidException(
++                    "Failed to parse IP address for IIQ");
++        }
++        final String url = getImpressionURL(
++                ipAddress == null ? "" : ipAddress.toString(),
++                userAgent == null ? "" : userAgent,
++                notificationEvent.getBidder() == null ? "" : notificationEvent.getBidder(),
++                notificationEvent.getEventRequest().getPrice(),
++                HttpUtil.getHostFromUrl(notificationEvent.getEventRequest().getUrl()),
++                notificationEvent.getEventRequest().getAbTestUuid()
++        );
++        final long timeout = 5000L;
++        //logger.info(url);
++        httpClient.get(url, timeout).recover(throwable -> {
++            logger.error(
++                    "Failed get to IIQ Impression endpoint, with a reason : %s "
++                            .formatted(throwable.getMessage()));
++
++            return Future.succeededFuture(HttpClientResponse.of(500, HttpUtil.headers(), ""));
++        });
++    }
++
++    @Value(staticConstructor = "of")
++    private static class ResponseCacheInfo {
++
++        JsonNode data;
++
++        FetchStatus fetchStatus;
++
++        Long cacheTtl;
++
++        String cacheKey;
++
++        public static ResponseCacheInfo withStatus(FetchStatus status) {
++            return ResponseCacheInfo.of(null, status, null, null);
++        }
++    }
++
++    @Setter
++    @Value
++    public static class State {
++        @NonFinal
++        String abTestUuid;
++    }
++
++    @Setter
++    @Value
++    private static class IDs {
++        @NonFinal
++        String thirdPartyID = "";
++        @NonFinal
++        String firstPartyID = "";
++        @NonFinal
++        String firstPartyCreationEPOC = "";
++        @NonFinal
++        String id5 = "";
++    }
++}
 diff --git a/src/main/java/org/prebid/server/events/EventRequest.java b/src/main/java/org/prebid/server/events/EventRequest.java
-index 64e430e39..324eb72a5 100644
+index 64e430e39..a5906a160 100644
 --- a/src/main/java/org/prebid/server/events/EventRequest.java
 +++ b/src/main/java/org/prebid/server/events/EventRequest.java
 @@ -3,6 +3,8 @@ package org.prebid.server.events;
@@ -215,7 +865,7 @@ index 64e430e39..324eb72a5 100644
  /**
   * Represents event request.
   */
-@@ -28,6 +30,12 @@ public class EventRequest {
+@@ -28,6 +30,14 @@ public class EventRequest {
  
      Analytics analytics;
  
@@ -225,11 +875,13 @@ index 64e430e39..324eb72a5 100644
 +
 +    String impId;
 +
++    String abTestUuid;
++
      public enum Type {
  
          win, imp
 diff --git a/src/main/java/org/prebid/server/events/EventUtil.java b/src/main/java/org/prebid/server/events/EventUtil.java
-index 864892e67..559467d67 100644
+index 864892e67..2d358fb2d 100644
 --- a/src/main/java/org/prebid/server/events/EventUtil.java
 +++ b/src/main/java/org/prebid/server/events/EventUtil.java
 @@ -4,7 +4,10 @@ import io.vertx.core.MultiMap;
@@ -266,17 +918,18 @@ index 864892e67..559467d67 100644
          final String auctionId = StringUtils.stripToNull(queryParams.get(AUCTION_ID));
  
          return EventRequest.builder()
-@@ -136,6 +146,9 @@ public class EventUtil {
+@@ -136,6 +146,10 @@ public class EventUtil {
                  .auctionId(auctionId)
                  .accountId(queryParams.get(ACCOUNT_ID_PARAMETER))
                  .bidder(queryParams.get(BIDDER_PARAMETER))
 +                .price(price)
 +                .url(queryParams.get("u"))
 +                .impId(queryParams.get("c"))
++                .abTestUuid(queryParams.get("ab"))
                  .timestamp(timestamp)
                  .format(format)
                  .analytics(analytics)
-@@ -171,6 +184,22 @@ public class EventUtil {
+@@ -171,6 +185,27 @@ public class EventUtil {
              result.append(nameValueAsQueryString(BIDDER_PARAMETER, eventRequest.getBidder()));
          }
  
@@ -291,6 +944,11 @@ index 864892e67..559467d67 100644
 +            result.append(nameValueAsQueryString("u", HttpUtil.encodeUrl(eventRequest.getUrl())));
 +        }
 +
++        // abTestUuid
++        if (StringUtils.isNotEmpty(eventRequest.getAbTestUuid())) {
++            result.append(nameValueAsQueryString("ab", HttpUtil.encodeUrl(eventRequest.getAbTestUuid())));
++        }
++
 +        // tag ID
 +        if (StringUtils.isNotEmpty(eventRequest.getImpId())) {
 +            result.append(nameValueAsQueryString("c", HttpUtil.encodeUrl(eventRequest.getImpId())));
@@ -299,8 +957,27 @@ index 864892e67..559467d67 100644
          // format
          if (eventRequest.getFormat() == EventRequest.Format.blank) {
              result.append(nameValueAsQueryString(FORMAT_PARAMETER, BLANK_FORMAT));
+diff --git a/src/main/java/org/prebid/server/events/EventsContext.java b/src/main/java/org/prebid/server/events/EventsContext.java
+index d60087abc..9d140abbb 100644
+--- a/src/main/java/org/prebid/server/events/EventsContext.java
++++ b/src/main/java/org/prebid/server/events/EventsContext.java
+@@ -2,6 +2,7 @@ package org.prebid.server.events;
+ 
+ import lombok.Builder;
+ import lombok.Value;
++import org.prebid.server.bids.IIQ;
+ 
+ /**
+  * Accumulates information for proceeding events.
+@@ -19,4 +20,6 @@ public class EventsContext {
+     Long auctionTimestamp;
+ 
+     String integration;
++
++    IIQ.State state;
+ }
 diff --git a/src/main/java/org/prebid/server/events/EventsService.java b/src/main/java/org/prebid/server/events/EventsService.java
-index 819dfeb0e..eec4a24e7 100644
+index 819dfeb0e..a7f60c0e0 100644
 --- a/src/main/java/org/prebid/server/events/EventsService.java
 +++ b/src/main/java/org/prebid/server/events/EventsService.java
 @@ -3,14 +3,17 @@ package org.prebid.server.events;
@@ -444,21 +1121,72 @@ index 819dfeb0e..eec4a24e7 100644
                              String accountId,
                              EventRequest.Analytics analytics,
                              EventRequest.Format format,
-@@ -91,6 +171,9 @@ public class EventsService {
+@@ -91,6 +171,10 @@ public class EventsService {
                  .auctionId(eventsContext.getAuctionId())
                  .accountId(accountId)
                  .bidder(bidder)
 +                .price(price)
 +                .url(url)
 +                .impId(impId)
++                .abTestUuid(eventsContext.getState().getAbTestUuid())
                  .timestamp(eventsContext.getAuctionTimestamp())
                  .format(format)
                  .integration(eventsContext.getIntegration())
 diff --git a/src/main/java/org/prebid/server/handler/NotificationEventHandler.java b/src/main/java/org/prebid/server/handler/NotificationEventHandler.java
-index 60e11195c..1da6163de 100644
+index 60e11195c..ed2a3b801 100644
 --- a/src/main/java/org/prebid/server/handler/NotificationEventHandler.java
 +++ b/src/main/java/org/prebid/server/handler/NotificationEventHandler.java
-@@ -160,6 +160,7 @@ public class NotificationEventHandler implements ApplicationResource {
+@@ -15,6 +15,7 @@ import org.prebid.server.analytics.AnalyticsReporter;
+ import org.prebid.server.analytics.model.NotificationEvent;
+ import org.prebid.server.analytics.reporter.AnalyticsReporterDelegator;
+ import org.prebid.server.auction.gpp.model.GppContextCreator;
++import org.prebid.server.bids.IIQ;
+ import org.prebid.server.events.EventRequest;
+ import org.prebid.server.events.EventUtil;
+ import org.prebid.server.exception.PreBidException;
+@@ -54,22 +55,41 @@ public class NotificationEventHandler implements ApplicationResource {
+     private final ApplicationSettings applicationSettings;
+     private final long defaultTimeoutMillis;
+     private final TrackingPixel trackingPixel;
++    private final IIQ iiq;
+ 
+     public NotificationEventHandler(ActivityInfrastructureCreator activityInfrastructureCreator,
+                                     AnalyticsReporterDelegator analyticsDelegator,
+                                     TimeoutFactory timeoutFactory,
+                                     ApplicationSettings applicationSettings,
++                                    IIQ iiq,
+                                     long defaultTimeoutMillis) {
+ 
+         this.activityInfrastructureCreator = Objects.requireNonNull(activityInfrastructureCreator);
+         this.analyticsDelegator = Objects.requireNonNull(analyticsDelegator);
+         this.timeoutFactory = Objects.requireNonNull(timeoutFactory);
+         this.applicationSettings = Objects.requireNonNull(applicationSettings);
++        this.iiq = Objects.requireNonNull(iiq);
+         this.defaultTimeoutMillis = defaultTimeoutMillis;
+ 
+         trackingPixel = createTrackingPixel();
+     }
+ 
++    public NotificationEventHandler(ActivityInfrastructureCreator activityInfrastructureCreator,
++                                    AnalyticsReporterDelegator analyticsDelegator,
++                                    TimeoutFactory timeoutFactory,
++                                    ApplicationSettings applicationSettings,
++                                    long defaultTimeoutMillis) {
++
++        this.activityInfrastructureCreator = Objects.requireNonNull(activityInfrastructureCreator);
++        this.analyticsDelegator = Objects.requireNonNull(analyticsDelegator);
++        this.timeoutFactory = Objects.requireNonNull(timeoutFactory);
++        this.applicationSettings = Objects.requireNonNull(applicationSettings);
++        this.defaultTimeoutMillis = defaultTimeoutMillis;
++        this.iiq = null;
++
++        trackingPixel = createTrackingPixel();
++    }
++
+     private static TrackingPixel createTrackingPixel() {
+         final byte[] bytes;
+         try {
+@@ -160,10 +180,14 @@ public class NotificationEventHandler implements ApplicationResource {
                      .timestamp(eventRequest.getTimestamp())
                      .integration(eventRequest.getIntegration())
                      .httpContext(HttpRequestContext.from(routingContext))
@@ -466,6 +1194,13 @@ index 60e11195c..1da6163de 100644
                      .activityInfrastructure(activityInfrastructure(account))
                      .build();
  
+             analyticsDelegator.processEvent(notificationEvent);
++            if (iiq != null) {
++                iiq.triggerImpressionAnalytics(notificationEvent);
++            }
+         }
+         respondWithOk(routingContext, eventRequest.getFormat() == EventRequest.Format.image);
+     }
 diff --git a/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java b/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java
 index d618c36fa..8844bfe8b 100644
 --- a/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java
@@ -491,3 +1226,109 @@ index d618c36fa..8844bfe8b 100644
      @Configuration
      @ConditionalOnProperty(prefix = "analytics.agma", name = "enabled", havingValue = "true")
      public static class AgmaAnalyticsConfiguration {
+diff --git a/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java b/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
+index deaa76832..027aca36b 100644
+--- a/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
++++ b/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
+@@ -73,6 +73,7 @@ import org.prebid.server.bidder.BidderErrorNotifier;
+ import org.prebid.server.bidder.BidderRequestCompletionTrackerFactory;
+ import org.prebid.server.bidder.HttpBidderRequestEnricher;
+ import org.prebid.server.bidder.HttpBidderRequester;
++import org.prebid.server.bids.IIQ;
+ import org.prebid.server.cache.BasicPbcStorageService;
+ import org.prebid.server.cache.CoreCacheService;
+ import org.prebid.server.cache.PbcStorageService;
+@@ -155,6 +156,18 @@ public class ServiceConfiguration {
+     @Value("${logging.sampling-rate:0.01}")
+     private double logSamplingRate;
+ 
++    @Bean
++    IIQ iiq(
++            HttpClient httpClient,
++            JacksonMapper mapper,
++            Ortb2ImplicitParametersResolver implicitParametersResolver) {
++
++        return new IIQ(
++                httpClient,
++                mapper,
++                implicitParametersResolver);
++    }
++
+     @Bean
+     CoreCacheService cacheService(
+             @Value("${cache.scheme}") String scheme,
+@@ -862,6 +875,7 @@ public class ServiceConfiguration {
+             HttpInteractionLogger httpInteractionLogger,
+             PriceFloorAdjuster priceFloorAdjuster,
+             PriceFloorProcessor priceFloorProcessor,
++            IIQ iiq,
+             BidsAdjuster bidsAdjuster,
+             Metrics metrics,
+             Clock clock,
+@@ -890,6 +904,7 @@ public class ServiceConfiguration {
+                 httpInteractionLogger,
+                 priceFloorAdjuster,
+                 priceFloorProcessor,
++                iiq,
+                 bidsAdjuster,
+                 metrics,
+                 clock,
+diff --git a/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java b/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java
+index b7c9eb405..96458eea1 100644
+--- a/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java
++++ b/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java
+@@ -26,6 +26,7 @@ import org.prebid.server.auction.requestfactory.AmpRequestFactory;
+ import org.prebid.server.auction.requestfactory.AuctionRequestFactory;
+ import org.prebid.server.auction.requestfactory.VideoRequestFactory;
+ import org.prebid.server.bidder.BidderCatalog;
++import org.prebid.server.bids.IIQ;
+ import org.prebid.server.cache.CoreCacheService;
+ import org.prebid.server.cookie.CookieDeprecationService;
+ import org.prebid.server.cookie.CookieSyncService;
+@@ -53,6 +54,8 @@ import org.prebid.server.health.PeriodicHealthChecker;
+ import org.prebid.server.hooks.execution.HookStageExecutor;
+ import org.prebid.server.json.JacksonMapper;
+ import org.prebid.server.log.HttpInteractionLogger;
++import org.prebid.server.log.Logger;
++import org.prebid.server.log.LoggerFactory;
+ import org.prebid.server.metric.Metrics;
+ import org.prebid.server.optout.GoogleRecaptchaVerifier;
+ import org.prebid.server.privacy.HostVendorTcfDefinerService;
+@@ -161,6 +164,8 @@ public class ApplicationServerConfiguration {
+         return ExceptionHandler.create(metrics);
+     }
+ 
++    public static final Logger logger = LoggerFactory.getLogger(ApplicationServerConfiguration.class);
++
+     @Bean
+     Router applicationServerRouter(Vertx vertx,
+                                    BodyHandler bodyHandler,
+@@ -177,7 +182,11 @@ public class ApplicationServerConfiguration {
+ 
+         resources.forEach(resource ->
+                 resource.endpoints().forEach(endpoint ->
+-                        router.route(endpoint.getMethod(), endpoint.getPath()).handler(resource)));
++                        router.route(endpoint.getMethod(), endpoint.getPath()).handler(resource)
++                                .failureHandler(r -> {
++                                    r.response().setStatusCode(500).end("Internal server error");
++                                    logger.error(r.failure().getMessage());
++                                })));
+ 
+         applicationPortAdminResourcesBinder.bind(router);
+ 
+@@ -437,6 +446,7 @@ public class ApplicationServerConfiguration {
+                                                       AnalyticsReporterDelegator analyticsReporterDelegator,
+                                                       TimeoutFactory timeoutFactory,
+                                                       ApplicationSettings applicationSettings,
++                                                      IIQ iiq,
+                                                       @Value("${event.default-timeout-ms}") long defaultTimeoutMillis) {
+ 
+         return new NotificationEventHandler(
+@@ -444,6 +454,7 @@ public class ApplicationServerConfiguration {
+                 analyticsReporterDelegator,
+                 timeoutFactory,
+                 applicationSettings,
++                iiq,
+                 defaultTimeoutMillis);
+     }
+ 
