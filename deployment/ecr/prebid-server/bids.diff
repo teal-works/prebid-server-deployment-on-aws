@@ -444,12 +444,136 @@ index c4b6dfd7a..e8a724193 100644
      }
  
      private static boolean transmitTransactionId(String bidder, AuctionContext context) {
+diff --git a/src/main/java/org/prebid/server/bids/EnhancedCookieSync.java b/src/main/java/org/prebid/server/bids/EnhancedCookieSync.java
+new file mode 100644
+index 000000000..5fb635937
+--- /dev/null
++++ b/src/main/java/org/prebid/server/bids/EnhancedCookieSync.java
+@@ -0,0 +1,118 @@
++package org.prebid.server.bids;
++
++import com.github.benmanes.caffeine.cache.Cache;
++import com.github.benmanes.caffeine.cache.Caffeine;
++import com.github.benmanes.caffeine.cache.Expiry;
++import io.vertx.ext.web.RoutingContext;
++import org.apache.http.protocol.HTTP;
++import org.checkerframework.checker.index.qual.NonNegative;
++import org.prebid.server.auction.model.IpAddress;
++import org.prebid.server.auction.requestfactory.Ortb2ImplicitParametersResolver;
++import org.prebid.server.cookie.UidsCookie;
++import org.prebid.server.cookie.proto.Uids;
++import org.prebid.server.json.JacksonMapper;
++import org.prebid.server.log.Logger;
++import org.prebid.server.log.LoggerFactory;
++import org.prebid.server.model.HttpRequestContext;
++
++import java.util.Objects;
++import java.util.concurrent.TimeUnit;
++
++public class EnhancedCookieSync {
++
++    private static final Logger logger = LoggerFactory.getLogger(EnhancedCookieSync.class);
++
++    private static final long TTL = 86400000L;
++
++    private final JacksonMapper mapper;
++    private final Ortb2ImplicitParametersResolver implicitParametersResolver;
++
++    private final Cache<String, Uids> userData;
++
++    public EnhancedCookieSync(JacksonMapper mapper,
++                              Ortb2ImplicitParametersResolver implicitParametersResolver) {
++
++        this.mapper = Objects.requireNonNull(mapper);
++        this.implicitParametersResolver = Objects.requireNonNull(implicitParametersResolver);
++
++        userData = Caffeine.newBuilder()
++                .expireAfter(new Expiry<String, Uids>() {
++                    @Override
++                    public long expireAfterCreate(String s, Uids uids, long l) {
++                        return TimeUnit.MILLISECONDS.toNanos(TTL);
++                    }
++
++                    @Override
++                    public long expireAfterUpdate(String s, Uids uids,
++                                                  long l, @NonNegative long l1) {
++                        return TimeUnit.MILLISECONDS.toNanos(TTL);
++                    }
++
++                    @Override
++                    public long expireAfterRead(String s, Uids uids,
++                                                long l, @NonNegative long l1) {
++                        return TimeUnit.MILLISECONDS.toNanos(TTL);
++                    }
++                })
++                .build();
++    }
++
++    public UidsCookie enhanceUids(UidsCookie uidsCookie, RoutingContext routingContext) {
++        final HttpRequestContext request = HttpRequestContext.from(routingContext);
++        return enhanceUids(uidsCookie, request);
++    }
++
++    public UidsCookie enhanceUids(UidsCookie uidsCookie, HttpRequestContext httpRequest) {
++        final String cacheKey = generateCacheKey(httpRequest);
++        final Uids fromCache = userData.getIfPresent(cacheKey);
++        if (uidsCookie.hasLiveUids()) {
++            if (fromCache == null) {
++                userData.put(cacheKey, uidsCookie.getCookieUids());
++                return uidsCookie;
++            } else {
++                if (mergeUids(uidsCookie, fromCache)) {
++                    userData.put(cacheKey, uidsCookie.getCookieUids());
++                }
++            }
++        } else {
++            if (fromCache != null) {
++                return new UidsCookie(fromCache, mapper);
++            }
++        }
++        return uidsCookie;
++    }
++
++    private boolean mergeUids(UidsCookie uidsCookie, Uids fromCache) {
++        final boolean[] hasBeenUpdated = {false};
++        fromCache.getUids().forEach((family, uid) -> {
++            if (!uidsCookie.hasLiveUidFrom(family)
++                    && uid.getExpires().toInstant().toEpochMilli() > System.currentTimeMillis()) {
++                uidsCookie.updateUid(family, uid.getUid());
++                hasBeenUpdated[0] = true;
++            }
++        });
++        return hasBeenUpdated[0];
++    }
++
++    public void updateEnhancedUids(UidsCookie uidsCookie, RoutingContext routingContext) {
++        final String cacheKey = generateCacheKey(routingContext);
++        userData.put(cacheKey, uidsCookie.getCookieUids());
++    }
++
++    private String generateCacheKey(RoutingContext routingContext) {
++        final HttpRequestContext request = HttpRequestContext.from(routingContext);
++        return generateCacheKey(request);
++    }
++
++    private String generateCacheKey(HttpRequestContext httpRequest) {
++        final IpAddress ip = implicitParametersResolver.findIpFromRequest(httpRequest);
++        final String ipAddress = ip.getIp();
++        final String ua = httpRequest.getHeaders().get(HTTP.USER_AGENT);
++        return (ipAddress == null ? "" : ipAddress).concat(ua == null ? "" : ua);
++    }
++
++    private void updateCache(String cacheKey, Uids uids) {
++        userData.put(cacheKey, uids);
++    }
++
++}
 diff --git a/src/main/java/org/prebid/server/bids/IIQ.java b/src/main/java/org/prebid/server/bids/IIQ.java
 new file mode 100644
-index 000000000..b401e92cc
+index 000000000..ae5402c1f
 --- /dev/null
 +++ b/src/main/java/org/prebid/server/bids/IIQ.java
-@@ -0,0 +1,402 @@
+@@ -0,0 +1,397 @@
 +package org.prebid.server.bids;
 +
 +import com.fasterxml.jackson.core.JsonProcessingException;
@@ -460,7 +584,6 @@ index 000000000..b401e92cc
 +import com.github.benmanes.caffeine.cache.Cache;
 +import com.github.benmanes.caffeine.cache.Caffeine;
 +import com.github.benmanes.caffeine.cache.Expiry;
-+import com.github.benmanes.caffeine.cache.Policy;
 +import com.iab.openrtb.request.BidRequest;
 +import com.iab.openrtb.request.Device;
 +import com.iab.openrtb.request.Eid;
@@ -524,7 +647,6 @@ index 000000000..b401e92cc
 +
 +    private final Set<String> fetchInProgress;
 +    private final Cache<String, ResponseCacheInfo> fetchedData;
-+    private final Policy.VarExpiration cacheExpiration;
 +
 +    public IIQ(HttpClient httpClient,
 +               JacksonMapper mapper,
@@ -556,7 +678,6 @@ index 000000000..b401e92cc
 +                    }
 +                })
 +                .<String, ResponseCacheInfo>build();
-+        cacheExpiration = fetchedData.policy().expireVariably().get();
 +    }
 +
 +    private String getEndpointURL(Device device, String domain, String thirdPartyID, String firstPartyID,
@@ -668,7 +789,7 @@ index 000000000..b401e92cc
 +    private JsonNode updateCache(ResponseCacheInfo cacheInfo) {
 +        final String cacheKey = cacheInfo.cacheKey;
 +        if (cacheInfo.getFetchStatus() == FetchStatus.success || !fetchedData.asMap().containsKey(cacheKey)) {
-+            cacheExpiration.put(cacheKey, cacheInfo, cacheInfo.cacheTtl, TimeUnit.MILLISECONDS);
++            fetchedData.put(cacheKey, cacheInfo);
 +        }
 +
 +        fetchInProgress.remove(cacheKey);
@@ -727,6 +848,9 @@ index 000000000..b401e92cc
 +            }
 +            final JsonNode data = fetch(deviceWithIP, domain, ids);
 +            if (data != null) {
++                if (data.get("abTestUuid") != null) {
++                    state.setAbTestUuid(data.get("abTestUuid").asText());
++                }
 +                if (data.get("data") != null && data.get("data").get("eids") != null) {
 +                    final ObjectReader reader = mapper.mapper().readerFor(new TypeReference<List<Eid>>() {
 +                    });
@@ -738,11 +862,6 @@ index 000000000..b401e92cc
 +                                euids.add(id);
 +                                iiqEids.removeIf(e -> e.getSource().equals(id.getSource()));
 +                            });
-+                        }
-+                        String abTestUuid = "";
-+                        if (data.get("abTestUuid") != null) {
-+                            abTestUuid = data.get("abTestUuid").asText();
-+                            state.setAbTestUuid(abTestUuid);
 +                        }
 +                        if (iiqEids != null) {
 +                            euids.addAll(iiqEids);
@@ -852,6 +971,89 @@ index 000000000..b401e92cc
 +        String id5 = "";
 +    }
 +}
+diff --git a/src/main/java/org/prebid/server/cookie/UidsCookieService.java b/src/main/java/org/prebid/server/cookie/UidsCookieService.java
+index 6b608f063..e39da8452 100644
+--- a/src/main/java/org/prebid/server/cookie/UidsCookieService.java
++++ b/src/main/java/org/prebid/server/cookie/UidsCookieService.java
+@@ -5,6 +5,7 @@ import io.vertx.core.http.Cookie;
+ import io.vertx.core.http.CookieSameSite;
+ import io.vertx.ext.web.RoutingContext;
+ import org.apache.commons.lang3.StringUtils;
++import org.prebid.server.bids.EnhancedCookieSync;
+ import org.prebid.server.cookie.model.UidWithExpiry;
+ import org.prebid.server.cookie.model.UidsCookieUpdateResult;
+ import org.prebid.server.cookie.proto.Uids;
+@@ -47,6 +48,7 @@ public class UidsCookieService {
+     private final PrioritizedCoopSyncProvider prioritizedCoopSyncProvider;
+     private final Metrics metrics;
+     private final JacksonMapper mapper;
++    private final EnhancedCookieSync enhancedCookieSync;
+ 
+     public UidsCookieService(String optOutCookieName,
+                              String optOutCookieValue,
+@@ -58,6 +60,35 @@ public class UidsCookieService {
+                              PrioritizedCoopSyncProvider prioritizedCoopSyncProvider,
+                              Metrics metrics,
+                              JacksonMapper mapper) {
++        if (maxCookieSizeBytes != 0 && maxCookieSizeBytes < MIN_COOKIE_SIZE_BYTES) {
++            throw new IllegalArgumentException(
++                    "Configured cookie size is less than allowed minimum size of " + MIN_COOKIE_SIZE_BYTES);
++        }
++
++        this.optOutCookieName = optOutCookieName;
++        this.optOutCookieValue = optOutCookieValue;
++        this.hostCookieFamily = hostCookieFamily;
++        this.hostCookieName = hostCookieName;
++        this.hostCookieDomain = StringUtils.isNotBlank(hostCookieDomain) ? hostCookieDomain : null;
++        this.ttlSeconds = Duration.ofDays(ttlDays).getSeconds();
++        this.maxCookieSizeBytes = maxCookieSizeBytes;
++        this.prioritizedCoopSyncProvider = Objects.requireNonNull(prioritizedCoopSyncProvider);
++        this.metrics = Objects.requireNonNull(metrics);
++        this.mapper = Objects.requireNonNull(mapper);
++        this.enhancedCookieSync = null;
++    }
++
++    public UidsCookieService(String optOutCookieName,
++                             String optOutCookieValue,
++                             String hostCookieFamily,
++                             String hostCookieName,
++                             String hostCookieDomain,
++                             int ttlDays,
++                             int maxCookieSizeBytes,
++                             PrioritizedCoopSyncProvider prioritizedCoopSyncProvider,
++                             Metrics metrics,
++                             JacksonMapper mapper,
++                             EnhancedCookieSync enhancedCookieSync) {
+ 
+         if (maxCookieSizeBytes != 0 && maxCookieSizeBytes < MIN_COOKIE_SIZE_BYTES) {
+             throw new IllegalArgumentException(
+@@ -74,6 +105,7 @@ public class UidsCookieService {
+         this.prioritizedCoopSyncProvider = Objects.requireNonNull(prioritizedCoopSyncProvider);
+         this.metrics = Objects.requireNonNull(metrics);
+         this.mapper = Objects.requireNonNull(mapper);
++        this.enhancedCookieSync = enhancedCookieSync;
+     }
+ 
+     /**
+@@ -93,10 +125,18 @@ public class UidsCookieService {
+      * Note: UIDs will be excluded from resulting {@link UidsCookie} if their value are 'null'.
+      */
+     public UidsCookie parseFromRequest(RoutingContext routingContext) {
++        if (enhancedCookieSync != null) {
++            return enhancedCookieSync.enhanceUids(parseFromCookies(HttpUtil.cookiesAsMap(routingContext)),
++                    routingContext);
++        }
+         return parseFromCookies(HttpUtil.cookiesAsMap(routingContext));
+     }
+ 
+     public UidsCookie parseFromRequest(HttpRequestContext httpRequest) {
++        if (enhancedCookieSync != null) {
++            return enhancedCookieSync.enhanceUids(parseFromCookies(HttpUtil.cookiesAsMap(httpRequest)),
++                    httpRequest);
++        }
+         return parseFromCookies(HttpUtil.cookiesAsMap(httpRequest));
+     }
+ 
 diff --git a/src/main/java/org/prebid/server/events/EventRequest.java b/src/main/java/org/prebid/server/events/EventRequest.java
 index 64e430e39..a5906a160 100644
 --- a/src/main/java/org/prebid/server/events/EventRequest.java
@@ -1201,6 +1403,71 @@ index 60e11195c..ed2a3b801 100644
          }
          respondWithOk(routingContext, eventRequest.getFormat() == EventRequest.Format.image);
      }
+diff --git a/src/main/java/org/prebid/server/handler/SetuidHandler.java b/src/main/java/org/prebid/server/handler/SetuidHandler.java
+index 4425e6984..26c6ae139 100644
+--- a/src/main/java/org/prebid/server/handler/SetuidHandler.java
++++ b/src/main/java/org/prebid/server/handler/SetuidHandler.java
+@@ -30,6 +30,7 @@ import org.prebid.server.bidder.UsersyncMethod;
+ import org.prebid.server.bidder.UsersyncMethodType;
+ import org.prebid.server.bidder.UsersyncUtil;
+ import org.prebid.server.bidder.Usersyncer;
++import org.prebid.server.bids.EnhancedCookieSync;
+ import org.prebid.server.cookie.UidsCookie;
+ import org.prebid.server.cookie.UidsCookieService;
+ import org.prebid.server.cookie.exception.UnauthorizedUidsException;
+@@ -86,6 +87,7 @@ public class SetuidHandler implements ApplicationResource {
+     private final Metrics metrics;
+     private final TimeoutFactory timeoutFactory;
+     private final Map<String, UsersyncMethodType> cookieNameToSyncType;
++    private final EnhancedCookieSync enhancedCookieSync;
+ 
+     public SetuidHandler(long defaultTimeout,
+                          UidsCookieService uidsCookieService,
+@@ -110,6 +112,34 @@ public class SetuidHandler implements ApplicationResource {
+         this.metrics = Objects.requireNonNull(metrics);
+         this.timeoutFactory = Objects.requireNonNull(timeoutFactory);
+         this.cookieNameToSyncType = collectMap(bidderCatalog);
++        this.enhancedCookieSync = null;
++    }
++
++    public SetuidHandler(long defaultTimeout,
++                         UidsCookieService uidsCookieService,
++                         ApplicationSettings applicationSettings,
++                         BidderCatalog bidderCatalog,
++                         SetuidPrivacyContextFactory setuidPrivacyContextFactory,
++                         SetuidGppService gppService,
++                         ActivityInfrastructureCreator activityInfrastructureCreator,
++                         HostVendorTcfDefinerService tcfDefinerService,
++                         AnalyticsReporterDelegator analyticsDelegator,
++                         Metrics metrics,
++                         TimeoutFactory timeoutFactory,
++                         EnhancedCookieSync enhancedCookieSync) {
++
++        this.defaultTimeout = defaultTimeout;
++        this.uidsCookieService = Objects.requireNonNull(uidsCookieService);
++        this.applicationSettings = Objects.requireNonNull(applicationSettings);
++        this.setuidPrivacyContextFactory = Objects.requireNonNull(setuidPrivacyContextFactory);
++        this.gppService = Objects.requireNonNull(gppService);
++        this.activityInfrastructureCreator = Objects.requireNonNull(activityInfrastructureCreator);
++        this.tcfDefinerService = Objects.requireNonNull(tcfDefinerService);
++        this.analyticsDelegator = Objects.requireNonNull(analyticsDelegator);
++        this.metrics = Objects.requireNonNull(metrics);
++        this.timeoutFactory = Objects.requireNonNull(timeoutFactory);
++        this.cookieNameToSyncType = collectMap(bidderCatalog);
++        this.enhancedCookieSync = enhancedCookieSync;
+     }
+ 
+     private static Map<String, UsersyncMethodType> collectMap(BidderCatalog bidderCatalog) {
+@@ -323,6 +353,9 @@ public class SetuidHandler implements ApplicationResource {
+ 
+         final UidsCookieUpdateResult uidsCookieUpdateResult =
+                 uidsCookieService.updateUidsCookie(setuidContext.getUidsCookie(), bidder, uid);
++        if (enhancedCookieSync != null) {
++            enhancedCookieSync.updateEnhancedUids(uidsCookieUpdateResult.getUidsCookie(), routingContext);
++        }
+         final Cookie updatedUidsCookie = uidsCookieService.toCookie(uidsCookieUpdateResult.getUidsCookie());
+         addCookie(routingContext, updatedUidsCookie);
+ 
 diff --git a/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java b/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java
 index d618c36fa..8844bfe8b 100644
 --- a/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java
@@ -1227,18 +1494,19 @@ index d618c36fa..8844bfe8b 100644
      @ConditionalOnProperty(prefix = "analytics.agma", name = "enabled", havingValue = "true")
      public static class AgmaAnalyticsConfiguration {
 diff --git a/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java b/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
-index deaa76832..027aca36b 100644
+index deaa76832..5be440821 100644
 --- a/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
 +++ b/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
-@@ -73,6 +73,7 @@ import org.prebid.server.bidder.BidderErrorNotifier;
+@@ -73,6 +73,8 @@ import org.prebid.server.bidder.BidderErrorNotifier;
  import org.prebid.server.bidder.BidderRequestCompletionTrackerFactory;
  import org.prebid.server.bidder.HttpBidderRequestEnricher;
  import org.prebid.server.bidder.HttpBidderRequester;
++import org.prebid.server.bids.EnhancedCookieSync;
 +import org.prebid.server.bids.IIQ;
  import org.prebid.server.cache.BasicPbcStorageService;
  import org.prebid.server.cache.CoreCacheService;
  import org.prebid.server.cache.PbcStorageService;
-@@ -155,6 +156,18 @@ public class ServiceConfiguration {
+@@ -155,6 +157,18 @@ public class ServiceConfiguration {
      @Value("${logging.sampling-rate:0.01}")
      private double logSamplingRate;
  
@@ -1257,7 +1525,43 @@ index deaa76832..027aca36b 100644
      @Bean
      CoreCacheService cacheService(
              @Value("${cache.scheme}") String scheme,
-@@ -862,6 +875,7 @@ public class ServiceConfiguration {
+@@ -649,6 +663,15 @@ public class ServiceConfiguration {
+         return new PrioritizedCoopSyncProvider(splitToSet(prioritizedBidders), bidderCatalog);
+     }
+ 
++    @Bean
++    EnhancedCookieSync enhancedCookieSync(
++            JacksonMapper mapper,
++            Ortb2ImplicitParametersResolver implicitParametersResolver
++    ) {
++        return new EnhancedCookieSync(mapper,
++                implicitParametersResolver);
++    }
++
+     @Bean
+     UidsCookieService uidsCookieService(
+             @Value("${host-cookie.optout-cookie.name:#{null}}") String optOutCookieName,
+@@ -660,7 +683,8 @@ public class ServiceConfiguration {
+             @Value("${host-cookie.max-cookie-size-bytes}") Integer maxCookieSizeBytes,
+             PrioritizedCoopSyncProvider prioritizedCoopSyncProvider,
+             Metrics metrics,
+-            JacksonMapper mapper) {
++            JacksonMapper mapper,
++            EnhancedCookieSync enhancedCookieSync) {
+ 
+         return new UidsCookieService(
+                 optOutCookieName,
+@@ -672,7 +696,8 @@ public class ServiceConfiguration {
+                 maxCookieSizeBytes,
+                 prioritizedCoopSyncProvider,
+                 metrics,
+-                mapper);
++                mapper,
++                enhancedCookieSync);
+     }
+ 
+     @Bean
+@@ -862,6 +887,7 @@ public class ServiceConfiguration {
              HttpInteractionLogger httpInteractionLogger,
              PriceFloorAdjuster priceFloorAdjuster,
              PriceFloorProcessor priceFloorProcessor,
@@ -1265,7 +1569,7 @@ index deaa76832..027aca36b 100644
              BidsAdjuster bidsAdjuster,
              Metrics metrics,
              Clock clock,
-@@ -890,6 +904,7 @@ public class ServiceConfiguration {
+@@ -890,6 +916,7 @@ public class ServiceConfiguration {
                  httpInteractionLogger,
                  priceFloorAdjuster,
                  priceFloorProcessor,
@@ -1274,18 +1578,19 @@ index deaa76832..027aca36b 100644
                  metrics,
                  clock,
 diff --git a/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java b/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java
-index b7c9eb405..96458eea1 100644
+index b7c9eb405..9ed40f454 100644
 --- a/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java
 +++ b/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java
-@@ -26,6 +26,7 @@ import org.prebid.server.auction.requestfactory.AmpRequestFactory;
+@@ -26,6 +26,8 @@ import org.prebid.server.auction.requestfactory.AmpRequestFactory;
  import org.prebid.server.auction.requestfactory.AuctionRequestFactory;
  import org.prebid.server.auction.requestfactory.VideoRequestFactory;
  import org.prebid.server.bidder.BidderCatalog;
++import org.prebid.server.bids.EnhancedCookieSync;
 +import org.prebid.server.bids.IIQ;
  import org.prebid.server.cache.CoreCacheService;
  import org.prebid.server.cookie.CookieDeprecationService;
  import org.prebid.server.cookie.CookieSyncService;
-@@ -53,6 +54,8 @@ import org.prebid.server.health.PeriodicHealthChecker;
+@@ -53,6 +55,8 @@ import org.prebid.server.health.PeriodicHealthChecker;
  import org.prebid.server.hooks.execution.HookStageExecutor;
  import org.prebid.server.json.JacksonMapper;
  import org.prebid.server.log.HttpInteractionLogger;
@@ -1294,7 +1599,7 @@ index b7c9eb405..96458eea1 100644
  import org.prebid.server.metric.Metrics;
  import org.prebid.server.optout.GoogleRecaptchaVerifier;
  import org.prebid.server.privacy.HostVendorTcfDefinerService;
-@@ -161,6 +164,8 @@ public class ApplicationServerConfiguration {
+@@ -161,6 +165,8 @@ public class ApplicationServerConfiguration {
          return ExceptionHandler.create(metrics);
      }
  
@@ -1303,7 +1608,7 @@ index b7c9eb405..96458eea1 100644
      @Bean
      Router applicationServerRouter(Vertx vertx,
                                     BodyHandler bodyHandler,
-@@ -177,7 +182,11 @@ public class ApplicationServerConfiguration {
+@@ -177,7 +183,11 @@ public class ApplicationServerConfiguration {
  
          resources.forEach(resource ->
                  resource.endpoints().forEach(endpoint ->
@@ -1316,7 +1621,27 @@ index b7c9eb405..96458eea1 100644
  
          applicationPortAdminResourcesBinder.bind(router);
  
-@@ -437,6 +446,7 @@ public class ApplicationServerConfiguration {
+@@ -346,7 +356,8 @@ public class ApplicationServerConfiguration {
+             HostVendorTcfDefinerService tcfDefinerService,
+             AnalyticsReporterDelegator analyticsReporter,
+             Metrics metrics,
+-            TimeoutFactory timeoutFactory) {
++            TimeoutFactory timeoutFactory,
++            EnhancedCookieSync enhancedCookieSync) {
+ 
+         return new SetuidHandler(
+                 defaultTimeoutMs,
+@@ -359,7 +370,8 @@ public class ApplicationServerConfiguration {
+                 tcfDefinerService,
+                 analyticsReporter,
+                 metrics,
+-                timeoutFactory);
++                timeoutFactory,
++                enhancedCookieSync);
+     }
+ 
+     @Bean
+@@ -437,6 +449,7 @@ public class ApplicationServerConfiguration {
                                                        AnalyticsReporterDelegator analyticsReporterDelegator,
                                                        TimeoutFactory timeoutFactory,
                                                        ApplicationSettings applicationSettings,
@@ -1324,7 +1649,7 @@ index b7c9eb405..96458eea1 100644
                                                        @Value("${event.default-timeout-ms}") long defaultTimeoutMillis) {
  
          return new NotificationEventHandler(
-@@ -444,6 +454,7 @@ public class ApplicationServerConfiguration {
+@@ -444,6 +457,7 @@ public class ApplicationServerConfiguration {
                  analyticsReporterDelegator,
                  timeoutFactory,
                  applicationSettings,
