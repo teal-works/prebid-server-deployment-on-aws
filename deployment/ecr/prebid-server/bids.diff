@@ -273,7 +273,7 @@ index 86fe28fdc..5166f3c85 100644
                  true,
                  eventsContext)
 diff --git a/src/main/java/org/prebid/server/auction/ExchangeService.java b/src/main/java/org/prebid/server/auction/ExchangeService.java
-index c4b6dfd7a..e8a724193 100644
+index 40c8ff86b..90e2a92bb 100644
 --- a/src/main/java/org/prebid/server/auction/ExchangeService.java
 +++ b/src/main/java/org/prebid/server/auction/ExchangeService.java
 @@ -54,6 +54,7 @@ import org.prebid.server.bidder.model.BidderBid;
@@ -570,7 +570,7 @@ index 000000000..5fb635937
 +}
 diff --git a/src/main/java/org/prebid/server/bids/IIQ.java b/src/main/java/org/prebid/server/bids/IIQ.java
 new file mode 100644
-index 000000000..ae5402c1f
+index 000000000..e0f9ce489
 --- /dev/null
 +++ b/src/main/java/org/prebid/server/bids/IIQ.java
 @@ -0,0 +1,397 @@
@@ -833,14 +833,14 @@ index 000000000..ae5402c1f
 +                exisitingEuids.forEach(id -> {
 +                    if (Objects.equals(id.getSource(), "pubcid.org") || Objects.equals(id.getSource(), domain)) {
 +                        ids.firstPartyID = id.getUids().getFirst().getId();
-+                    } else if (Objects.equals(id.getSource(), "id5-sync.com")) {
-+                        ids.id5 = id.getUids().getFirst().getId();
++                    } else if (Objects.equals(id.getSource(), "criteo.com")) {
++                        ids.preferredThirdPartyID = id.getUids().getFirst().getId();
 +                    } else {
 +                        ids.thirdPartyID = id.getUids().getFirst().getId();
 +                    }
 +                });
-+                if (!ids.id5.isEmpty()) {
-+                    ids.thirdPartyID = ids.id5;
++                if (!ids.preferredThirdPartyID.isEmpty()) {
++                    ids.thirdPartyID = ids.preferredThirdPartyID;
 +                }
 +                if (!ids.firstPartyID.isEmpty()) {
 +                    ids.firstPartyCreationEPOC = String.valueOf(System.currentTimeMillis());
@@ -968,7 +968,7 @@ index 000000000..ae5402c1f
 +        @NonFinal
 +        String firstPartyCreationEPOC = "";
 +        @NonFinal
-+        String id5 = "";
++        String preferredThirdPartyID = "";
 +    }
 +}
 diff --git a/src/main/java/org/prebid/server/cookie/UidsCookieService.java b/src/main/java/org/prebid/server/cookie/UidsCookieService.java
@@ -1404,10 +1404,10 @@ index 60e11195c..ed2a3b801 100644
          respondWithOk(routingContext, eventRequest.getFormat() == EventRequest.Format.image);
      }
 diff --git a/src/main/java/org/prebid/server/handler/SetuidHandler.java b/src/main/java/org/prebid/server/handler/SetuidHandler.java
-index 4425e6984..26c6ae139 100644
+index 728285fb0..947226fa8 100644
 --- a/src/main/java/org/prebid/server/handler/SetuidHandler.java
 +++ b/src/main/java/org/prebid/server/handler/SetuidHandler.java
-@@ -30,6 +30,7 @@ import org.prebid.server.bidder.UsersyncMethod;
+@@ -31,6 +31,7 @@ import org.prebid.server.bidder.UsersyncFormat;
  import org.prebid.server.bidder.UsersyncMethodType;
  import org.prebid.server.bidder.UsersyncUtil;
  import org.prebid.server.bidder.Usersyncer;
@@ -1415,18 +1415,18 @@ index 4425e6984..26c6ae139 100644
  import org.prebid.server.cookie.UidsCookie;
  import org.prebid.server.cookie.UidsCookieService;
  import org.prebid.server.cookie.exception.UnauthorizedUidsException;
-@@ -86,6 +87,7 @@ public class SetuidHandler implements ApplicationResource {
+@@ -90,6 +91,7 @@ public class SetuidHandler implements ApplicationResource {
      private final Metrics metrics;
      private final TimeoutFactory timeoutFactory;
-     private final Map<String, UsersyncMethodType> cookieNameToSyncType;
+     private final Map<String, Pair<String, UsersyncMethodType>> cookieNameToBidderAndSyncType;
 +    private final EnhancedCookieSync enhancedCookieSync;
  
      public SetuidHandler(long defaultTimeout,
                           UidsCookieService uidsCookieService,
-@@ -110,6 +112,34 @@ public class SetuidHandler implements ApplicationResource {
+@@ -114,6 +116,34 @@ public class SetuidHandler implements ApplicationResource {
          this.metrics = Objects.requireNonNull(metrics);
          this.timeoutFactory = Objects.requireNonNull(timeoutFactory);
-         this.cookieNameToSyncType = collectMap(bidderCatalog);
+         this.cookieNameToBidderAndSyncType = collectUsersyncers(bidderCatalog);
 +        this.enhancedCookieSync = null;
 +    }
 +
@@ -1453,12 +1453,12 @@ index 4425e6984..26c6ae139 100644
 +        this.analyticsDelegator = Objects.requireNonNull(analyticsDelegator);
 +        this.metrics = Objects.requireNonNull(metrics);
 +        this.timeoutFactory = Objects.requireNonNull(timeoutFactory);
-+        this.cookieNameToSyncType = collectMap(bidderCatalog);
++        this.cookieNameToBidderAndSyncType = collectUsersyncers(bidderCatalog);
 +        this.enhancedCookieSync = enhancedCookieSync;
      }
  
-     private static Map<String, UsersyncMethodType> collectMap(BidderCatalog bidderCatalog) {
-@@ -323,6 +353,9 @@ public class SetuidHandler implements ApplicationResource {
+     private static Map<String, Pair<String, UsersyncMethodType>> collectUsersyncers(BidderCatalog bidderCatalog) {
+@@ -330,6 +360,9 @@ public class SetuidHandler implements ApplicationResource {
  
          final UidsCookieUpdateResult uidsCookieUpdateResult =
                  uidsCookieService.updateUidsCookie(setuidContext.getUidsCookie(), bidder, uid);
