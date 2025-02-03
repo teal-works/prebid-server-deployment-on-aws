@@ -21,15 +21,22 @@ index 9bbfdc888..b360a75ad 100644
  
 diff --git a/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java b/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java
 new file mode 100644
-index 000000000..00e1688b6
+index 000000000..dcb7adb2d
 --- /dev/null
 +++ b/src/main/java/org/prebid/server/analytics/reporter/bids/BidsAnalyticsReporter.java
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,221 @@
 +package org.prebid.server.analytics.reporter.bids;
 +
 +import com.fasterxml.jackson.core.JsonProcessingException;
 +import com.fasterxml.jackson.core.io.JsonStringEncoder;
 +import com.fasterxml.jackson.databind.JsonNode;
++import com.iab.openrtb.request.BidRequest;
++import com.iab.openrtb.request.Device;
++import com.iab.openrtb.request.Eid;
++import com.iab.openrtb.request.Geo;
++import com.iab.openrtb.request.Site;
++import com.iab.openrtb.request.User;
++import com.iab.openrtb.response.BidResponse;
 +import io.vertx.core.Future;
 +import org.prebid.server.analytics.AnalyticsReporter;
 +import org.prebid.server.analytics.model.AmpEvent;
@@ -39,13 +46,25 @@ index 000000000..00e1688b6
 +import org.prebid.server.analytics.model.SetuidEvent;
 +import org.prebid.server.analytics.model.VideoEvent;
 +import org.prebid.server.analytics.reporter.log.model.LogEvent;
++import org.prebid.server.auction.model.AuctionContext;
++import org.prebid.server.auction.model.AuctionParticipation;
++import org.prebid.server.auction.model.BidderRequest;
++import org.prebid.server.bids.Filters;
 +import org.prebid.server.events.EventRequest;
 +import org.prebid.server.json.JacksonMapper;
 +import org.prebid.server.log.Logger;
 +import org.prebid.server.log.LoggerFactory;
++import org.prebid.server.proto.openrtb.ext.request.ExtDevice;
++import org.prebid.server.proto.openrtb.ext.request.ExtUser;
++import org.prebid.server.settings.model.Account;
++import org.prebid.server.util.ObjectUtil;
 +
++import java.math.BigDecimal;
 +import java.math.RoundingMode;
++import java.util.ArrayList;
++import java.util.List;
 +import java.util.Objects;
++import java.util.concurrent.atomic.AtomicReference;
 +
 +/**
 + * {@link AnalyticsReporter} implementation that writes application events to a log, for illustration purpose only.
@@ -53,13 +72,16 @@ index 000000000..00e1688b6
 +public class BidsAnalyticsReporter implements AnalyticsReporter {
 +
 +    public static final Logger logger = LoggerFactory.getLogger("ANALYTICS");
++    public static final Logger auctionLogger = LoggerFactory.getLogger("AUCTION");
 +
 +    private final JacksonMapper mapper;
 +    private final JsonStringEncoder encoder;
++    private final Filters filters;
 +
-+    public BidsAnalyticsReporter(JacksonMapper mapper) {
++    public BidsAnalyticsReporter(JacksonMapper mapper, Filters filters) {
 +        this.mapper = Objects.requireNonNull(mapper);
 +        this.encoder = JsonStringEncoder.getInstance();
++        this.filters = Objects.requireNonNull(filters);
 +    }
 +
 +    @Override
@@ -67,7 +89,7 @@ index 000000000..00e1688b6
 +
 +        final LogEvent<?> logEvent = switch (event) {
 +            case AmpEvent ampEvent -> LogEvent.of("/openrtb2/amp", ampEvent.getBidResponse());
-+            case AuctionEvent auctionEvent -> LogEvent.of("/openrtb2/auction", auctionEvent.getBidResponse());
++            case AuctionEvent auctionEvent -> LogEvent.of("auction", getEventData(auctionEvent));
 +            case CookieSyncEvent cookieSyncEvent -> LogEvent.of("/cookie_sync", cookieSyncEvent.getBidderStatus());
 +            case NotificationEvent notificationEvent ->
 +                LogEvent.of(notificationEvent.getType().name(), getEventData(notificationEvent));
@@ -80,6 +102,12 @@ index 000000000..00e1688b6
 +
 +        if (logEvent.getType().equals("win") || logEvent.getType().equals("imp")) {
 +            logger.info(new String(encoder.quoteAsString(mapper.encodeToString(logEvent))));
++        } else if (logEvent.getType().equals("auction")) {
++            final JsonNode auctionEvent = (JsonNode) logEvent.getEvent();
++            final double sampleRate = auctionEvent.get("sampleRate").asDouble();
++            if (Math.random() < sampleRate) {
++                auctionLogger.info(new String(encoder.quoteAsString(mapper.encodeToString(logEvent))));
++            }
 +        }
 +
 +        return Future.succeededFuture();
@@ -89,27 +117,128 @@ index 000000000..00e1688b6
 +        final EventRequest eventReq = notificationEvent.getEventRequest();
 +        try {
 +            return mapper.mapper().readTree("{\"account\":\""
-+                    + (eventReq.getAccountId() != null ? eventReq.getAccountId() : "")
-+                    + "\",\"bidder\":\"" + (eventReq.getBidder() != null
-+                    ? new String(encoder.quoteAsString(eventReq.getBidder())) : "")
-+                    + "\",\"price\":\"" + (eventReq.getPrice() != null
-+                    ? eventReq.getPrice().setScale(5, RoundingMode.HALF_DOWN)
-+                    .stripTrailingZeros().toPlainString() : "")
-+                    + "\",\"url\":\"" + (eventReq.getUrl() != null
-+                    ? new String(encoder.quoteAsString(eventReq.getUrl())) : "")
-+                    + "\",\"impId\":\"" + (eventReq.getImpId() != null
-+                    ? new String(encoder.quoteAsString(eventReq.getImpId())) : "")
-+                    + "\",\"auctionId\":\"" + (eventReq.getAuctionId() != null
-+                    ? new String(encoder.quoteAsString(eventReq.getAuctionId())) : "") + "\"}");
++                    + encode(eventReq.getAccountId())
++                    + "\",\"bidder\":\"" + encode(eventReq.getBidder())
++                    + "\",\"price\":\"" + encodeBigDecimal(eventReq.getPrice())
++                    + "\",\"url\":\"" + encode(eventReq.getUrl())
++                    + "\",\"impId\":\"" + encode(eventReq.getImpId())
++                    + "\",\"auctionId\":\"" + encode(eventReq.getAuctionId())
++                    + "\"}");
 +        } catch (JsonProcessingException e) {
 +            logger.error("Bids log adapter failed to parse JSON.");
 +        }
 +        return mapper.mapper().nullNode();
 +    }
 +
++    private JsonNode getEventData(AuctionEvent auctionEvent) {
++        final BidResponse bidResponse = auctionEvent.getBidResponse();
++        final AtomicReference<BigDecimal> topBid = new AtomicReference<>();
++        final AtomicReference<String> topBidder = new AtomicReference<>();
++        final ArrayList<String> bidders = new ArrayList<>();
++        final ArrayList<String> nonBidders = new ArrayList<>();
++        final ArrayList<String> filteredBidders = new ArrayList<>();
++        final AtomicReference<String> slowestBidder = new AtomicReference<>("");
++        final AtomicReference<Integer> longestTime = new AtomicReference<>(0);
++
++        if (bidResponse != null) {
++            if (bidResponse.getSeatbid() != null && !bidResponse.getSeatbid().isEmpty()) {
++                bidResponse.getSeatbid().forEach(seatBid -> {
++                    final String seat = seatBid.getSeat();
++                    bidders.add(seat);
++                    seatBid.getBid().forEach(bid -> {
++                        final BigDecimal price = bid.getPrice();
++                        if (topBid.get() == null || price.compareTo(topBid.get()) > 0) {
++                            topBid.set(price);
++                            topBidder.set(seat);
++                        }
++                    });
++                });
++            }
++            if (bidResponse.getExt() != null && bidResponse.getExt().getResponsetimemillis() != null
++                    && !bidResponse.getExt().getResponsetimemillis().isEmpty()) {
++                bidResponse.getExt().getResponsetimemillis().forEach((bidder, value) -> {
++                    if (value > 0) {
++                        if (longestTime.get() == null || longestTime.get() < value) {
++                            longestTime.set(value);
++                            slowestBidder.set(bidder);
++                        }
++                        if (!bidders.contains(bidder)) {
++                            nonBidders.add(bidder);
++                        }
++                    } else {
++                        filteredBidders.add(bidder);
++                    }
++                });
++            }
++        }
++
++        final AuctionContext auctionContext = auctionEvent.getAuctionContext();
++        final String account = ObjectUtil.getIfNotNull(auctionContext.getAccount(), Account::getId);
++        final String domain = ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(
++                auctionContext.getBidRequest(), BidRequest::getSite), Site::getDomain);
++        final String deviceType = ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(
++                auctionContext.getBidRequest(), BidRequest::getDevice), Device::getExt), ExtDevice::getDevicetype);
++        final String countryCode = ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(
++                auctionContext.getBidRequest(), BidRequest::getDevice), Device::getGeo), Geo::getCountry);
++
++        final double sampleRate = filters.getSampleRate(account, auctionContext.getBidRequest());
++
++        final User user = ObjectUtil.getIfNotNull(auctionContext.getBidRequest(), BidRequest::getUser);
++        int uidsCount = 0;
++        int eidsCount = 0;
++        if (user != null) {
++            for (AuctionParticipation bidder : auctionContext.getAuctionParticipations()) {
++                final String buyerId = ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(
++                                bidder.getBidderRequest(), BidderRequest::getBidRequest), BidRequest::getUser),
++                        User::getBuyeruid);
++                if (buyerId != null) {
++                    uidsCount++;
++                }
++            }
++
++            List<Eid> eids = ObjectUtil.getIfNotNull(user.getExt(), ExtUser::getEids);
++            if (eids == null) {
++                eids = user.getEids();
++            }
++            eidsCount = eids != null ? eids.size() : 0;
++        }
++
++        try {
++            return mapper.mapper().readTree("{\"account\":\"" + encode(account)
++                    + "\",\"topBidder\":\"" + encode(topBidder.get())
++                    + "\",\"topBid\":\"" + encodeBigDecimal(topBid.get())
++                    + "\",\"domain\":\"" + encode(domain)
++                    + "\",\"deviceType\":\"" + encode(deviceType)
++                    + "\",\"countryCode\":\"" + encode(countryCode)
++                    + "\",\"auctionId\":\""
++                    + encode(ObjectUtil.getIfNotNull(auctionContext.getBidRequest(), BidRequest::getId))
++                    + "\",\"bidders\":\"" + encode(String.join(",", bidders))
++                    + "\",\"nonBidders\":\"" + encode(String.join(",", nonBidders))
++                    + "\",\"filteredBidders\":\"" + encode(String.join(",", filteredBidders))
++                    + "\",\"slowestBidder\":\"" + encode(slowestBidder.get())
++                    + "\",\"slowestBidderMs\":\"" + encode(longestTime.get().toString())
++                    + "\",\"uids\":\"" + uidsCount
++                    + "\",\"eids\":\"" + eidsCount
++                    + "\",\"sampleRate\":\"" + sampleRate
++                    + "\"}");
++        } catch (JsonProcessingException e) {
++            logger.error("Bids log adapter failed to parse JSON.");
++        }
++        return mapper.mapper().nullNode();
++    }
++
++    private String encode(String toEncode) {
++        return toEncode == null ? "" : new String(encoder.quoteAsString(toEncode));
++    }
++
++    private String encodeBigDecimal(BigDecimal bd) {
++        return bd == null ? "" : bd.setScale(5, RoundingMode.HALF_DOWN)
++                .stripTrailingZeros().toPlainString();
++    }
++
 +    @Override
 +    public int vendorId() {
-+        return 0;
++        return 1378;
 +    }
 +
 +    @Override
@@ -273,42 +402,46 @@ index 86fe28fdc..5166f3c85 100644
                  true,
                  eventsContext)
 diff --git a/src/main/java/org/prebid/server/auction/ExchangeService.java b/src/main/java/org/prebid/server/auction/ExchangeService.java
-index 40c8ff86b..90e2a92bb 100644
+index 40c8ff86b..e89d95cd1 100644
 --- a/src/main/java/org/prebid/server/auction/ExchangeService.java
 +++ b/src/main/java/org/prebid/server/auction/ExchangeService.java
-@@ -54,6 +54,7 @@ import org.prebid.server.bidder.model.BidderBid;
+@@ -54,6 +54,8 @@ import org.prebid.server.bidder.model.BidderBid;
  import org.prebid.server.bidder.model.BidderError;
  import org.prebid.server.bidder.model.BidderSeatBid;
  import org.prebid.server.bidder.model.Price;
++import org.prebid.server.bids.Filters;
 +import org.prebid.server.bids.IIQ;
  import org.prebid.server.cookie.UidsCookie;
  import org.prebid.server.exception.InvalidRequestException;
  import org.prebid.server.exception.PreBidException;
-@@ -147,6 +148,7 @@ public class ExchangeService {
+@@ -147,6 +149,8 @@ public class ExchangeService {
      private final HttpInteractionLogger httpInteractionLogger;
      private final PriceFloorAdjuster priceFloorAdjuster;
      private final PriceFloorProcessor priceFloorProcessor;
 +    private final IIQ iiq;
++    private final Filters filters;
      private final BidsAdjuster bidsAdjuster;
      private final Metrics metrics;
      private final Clock clock;
-@@ -174,6 +176,7 @@ public class ExchangeService {
+@@ -174,6 +178,8 @@ public class ExchangeService {
                             HttpInteractionLogger httpInteractionLogger,
                             PriceFloorAdjuster priceFloorAdjuster,
                             PriceFloorProcessor priceFloorProcessor,
 +                           IIQ iiq,
++                           Filters filters,
                             BidsAdjuster bidsAdjuster,
                             Metrics metrics,
                             Clock clock,
-@@ -201,6 +204,7 @@ public class ExchangeService {
+@@ -201,6 +207,8 @@ public class ExchangeService {
          this.httpInteractionLogger = Objects.requireNonNull(httpInteractionLogger);
          this.priceFloorAdjuster = Objects.requireNonNull(priceFloorAdjuster);
          this.priceFloorProcessor = Objects.requireNonNull(priceFloorProcessor);
 +        this.iiq = Objects.requireNonNull(iiq);
++        this.filters = Objects.requireNonNull(filters);
          this.bidsAdjuster = Objects.requireNonNull(bidsAdjuster);
          this.metrics = Objects.requireNonNull(metrics);
          this.clock = Objects.requireNonNull(clock);
-@@ -240,6 +244,8 @@ public class ExchangeService {
+@@ -240,6 +248,8 @@ public class ExchangeService {
          final Map<String, MultiBidConfig> bidderToMultiBid = bidderToMultiBids(bidRequest, debugWarnings);
          receivedContext.getBidRejectionTrackers().putAll(makeBidRejectionTrackers(bidRequest, aliases));
  
@@ -317,7 +450,7 @@ index 40c8ff86b..90e2a92bb 100644
          final boolean debugEnabled = receivedContext.getDebugContext().isDebugEnabled();
          metrics.updateDebugRequestMetrics(debugEnabled);
          metrics.updateAccountDebugRequestMetrics(account, debugEnabled);
-@@ -247,7 +253,8 @@ public class ExchangeService {
+@@ -247,7 +257,8 @@ public class ExchangeService {
          return storedResponseProcessor.getStoredResponseResult(bidRequest.getImp(), timeout)
                  .map(storedResponseResult -> populateStoredResponse(storedResponseResult, storedAuctionResponses))
                  .compose(storedResponseResult ->
@@ -327,7 +460,7 @@ index 40c8ff86b..90e2a92bb 100644
                                  .map(receivedContext::with))
  
                  .map(context -> updateRequestMetric(context, uidsCookie, aliases, account, requestTypeMetric))
-@@ -275,7 +282,7 @@ public class ExchangeService {
+@@ -275,7 +286,7 @@ public class ExchangeService {
                          .map(auctionParticipations -> updateResponsesMetrics(auctionParticipations, account, aliases))
                          .map(context::with))
                  // produce response from bidder results
@@ -336,7 +469,7 @@ index 40c8ff86b..90e2a92bb 100644
                          .map(bidResponse -> criteriaLogManager.traceResponse(
                                  logger,
                                  bidResponse,
-@@ -429,7 +436,8 @@ public class ExchangeService {
+@@ -429,7 +440,8 @@ public class ExchangeService {
              AuctionContext context,
              StoredResponseResult storedResponseResult,
              BidderAliases aliases,
@@ -346,7 +479,7 @@ index 40c8ff86b..90e2a92bb 100644
  
          final List<Imp> imps = storedResponseResult.getRequiredRequestImps().stream()
                  .filter(imp -> bidderParamsFromImpExt(imp.getExt()) != null)
-@@ -449,7 +457,8 @@ public class ExchangeService {
+@@ -449,7 +461,8 @@ public class ExchangeService {
                  aliases,
                  impBidderToStoredBidResponse,
                  imps,
@@ -356,7 +489,7 @@ index 40c8ff86b..90e2a92bb 100644
      }
  
      private Set<String> bidderNamesFromImpExt(Imp imp, BidderAliases aliases) {
-@@ -484,7 +493,8 @@ public class ExchangeService {
+@@ -484,7 +497,8 @@ public class ExchangeService {
              BidderAliases aliases,
              Map<String, Map<String, String>> impBidderToStoredResponse,
              List<Imp> imps,
@@ -366,7 +499,7 @@ index 40c8ff86b..90e2a92bb 100644
  
          final BidRequest bidRequest = context.getBidRequest();
          final ExtRequest requestExt = bidRequest.getExt();
-@@ -503,7 +513,8 @@ public class ExchangeService {
+@@ -503,7 +517,8 @@ public class ExchangeService {
                          bidderToMultiBid,
                          biddersToConfigs,
                          aliases,
@@ -376,7 +509,7 @@ index 40c8ff86b..90e2a92bb 100644
      }
  
      private Map<String, ExtBidderConfigOrtb> getBiddersToConfigs(ExtRequestPrebid prebid) {
-@@ -641,7 +652,8 @@ public class ExchangeService {
+@@ -641,7 +656,8 @@ public class ExchangeService {
              Map<String, MultiBidConfig> bidderToMultiBid,
              Map<String, ExtBidderConfigOrtb> biddersToConfigs,
              BidderAliases aliases,
@@ -386,7 +519,7 @@ index 40c8ff86b..90e2a92bb 100644
  
          final Map<String, JsonNode> bidderToPrebidBidders = bidderToPrebidBidders(bidRequest);
          final List<AuctionParticipation> bidderRequests = bidderPrivacyResults.stream()
-@@ -656,7 +668,8 @@ public class ExchangeService {
+@@ -656,7 +672,8 @@ public class ExchangeService {
                          biddersToConfigs,
                          bidderToPrebidBidders,
                          aliases,
@@ -396,7 +529,7 @@ index 40c8ff86b..90e2a92bb 100644
                  // Can't be removed after we prepare workflow to filter blocked
                  .filter(auctionParticipation -> !auctionParticipation.isRequestBlocked())
                  .collect(Collectors.toCollection(ArrayList::new));
-@@ -693,7 +706,8 @@ public class ExchangeService {
+@@ -693,7 +710,8 @@ public class ExchangeService {
              Map<String, ExtBidderConfigOrtb> biddersToConfigs,
              Map<String, JsonNode> bidderToPrebidBidders,
              BidderAliases bidderAliases,
@@ -406,7 +539,7 @@ index 40c8ff86b..90e2a92bb 100644
  
          final boolean blockedRequestByTcf = bidderPrivacyResult.isBlockedRequestByTcf();
          final boolean blockedAnalyticsByTcf = bidderPrivacyResult.isBlockedAnalyticsByTcf();
-@@ -722,7 +736,8 @@ public class ExchangeService {
+@@ -722,7 +740,8 @@ public class ExchangeService {
                  biddersToConfigs,
                  bidderToPrebidBidders,
                  bidderAliases,
@@ -416,7 +549,7 @@ index 40c8ff86b..90e2a92bb 100644
  
          final BidderRequest bidderRequest = BidderRequest.builder()
                  .bidder(bidder)
-@@ -749,7 +764,8 @@ public class ExchangeService {
+@@ -749,7 +768,8 @@ public class ExchangeService {
                                           Map<String, ExtBidderConfigOrtb> biddersToConfigs,
                                           Map<String, JsonNode> bidderToPrebidBidders,
                                           BidderAliases bidderAliases,
@@ -426,7 +559,7 @@ index 40c8ff86b..90e2a92bb 100644
  
          final String bidder = bidderPrivacyResult.getRequestBidder();
          final BidRequest bidRequest = priceFloorProcessor.enrichWithPriceFloors(
-@@ -812,7 +828,7 @@ public class ExchangeService {
+@@ -812,7 +832,7 @@ public class ExchangeService {
                  bidderAliases,
                  context.getDebugWarnings());
  
@@ -435,7 +568,7 @@ index 40c8ff86b..90e2a92bb 100644
                  // User was already prepared above
                  .user(bidderPrivacyResult.getUser())
                  .device(bidderPrivacyResult.getDevice())
-@@ -822,7 +838,7 @@ public class ExchangeService {
+@@ -822,7 +842,7 @@ public class ExchangeService {
                  .site(isSite ? preparedSite : null)
                  .source(prepareSource(bidder, bidRequest, transmitTid))
                  .ext(prepareExt(bidder, bidderToPrebidBidders, bidderToMultiBid, bidRequest.getExt()))
@@ -444,6 +577,98 @@ index 40c8ff86b..90e2a92bb 100644
      }
  
      private static boolean transmitTransactionId(String bidder, AuctionContext context) {
+@@ -1125,12 +1145,24 @@ public class ExchangeService {
+                     bidderName);
+         }
+ 
+-        return Future.succeededFuture(mediaTypeProcessingResult.getBidRequest())
+-                .map(bidderRequest::with)
+-                .compose(modifiedBidderRequest -> invokeHooksAndRequestBids(
+-                        auctionContext, modifiedBidderRequest, timeout, aliases))
+-                .map(bidderResponse -> bidderResponse.with(
+-                        addWarnings(bidderResponse.getSeatBid(), mediaTypeProcessingErrors)));
++        return filters.getFilters(auctionContext.getAccount().getId(),
++                bidderRequest.getBidRequest(), bidderName).compose(filter -> {
++                    if (filter != null) {
++                        if (Math.random() > filter) {
++                            return processReject(
++                                    auctionContext,
++                                    BidRejectionReason.REQUEST_BLOCKED_FILTERED,
++                                    List.of(BidderError.generic("Filtered out by Teal Dynamic Filtering Algo.")),
++                                    bidderName);
++                        }
++                    }
++                    return Future.succeededFuture(mediaTypeProcessingResult.getBidRequest())
++                            .map(bidderRequest::with)
++                            .compose(modifiedBidderRequest -> invokeHooksAndRequestBids(
++                                    auctionContext, modifiedBidderRequest, timeout, aliases))
++                            .map(bidderResponse -> bidderResponse.with(
++                                    addWarnings(bidderResponse.getSeatBid(), mediaTypeProcessingErrors)));
++                });
+     }
+ 
+     private boolean isUnacceptableCurrency(AuctionContext auctionContext, String originalBidderName) {
+diff --git a/src/main/java/org/prebid/server/auction/model/BidRejectionReason.java b/src/main/java/org/prebid/server/auction/model/BidRejectionReason.java
+index fc3ee36bd..f6b8f86ab 100644
+--- a/src/main/java/org/prebid/server/auction/model/BidRejectionReason.java
++++ b/src/main/java/org/prebid/server/auction/model/BidRejectionReason.java
+@@ -63,6 +63,8 @@ public enum BidRejectionReason {
+      */
+     REQUEST_BLOCKED_UNACCEPTABLE_CURRENCY(205),
+ 
++    REQUEST_BLOCKED_FILTERED(299),
++
+     /**
+      * The bidder is called, but its response is rejected.
+      * Applied if any other RESPONSE_REJECTED reason is not recognized.
+diff --git a/src/main/java/org/prebid/server/auction/requestfactory/Ortb2RequestFactory.java b/src/main/java/org/prebid/server/auction/requestfactory/Ortb2RequestFactory.java
+index 01c4c8a43..cbe559b4d 100644
+--- a/src/main/java/org/prebid/server/auction/requestfactory/Ortb2RequestFactory.java
++++ b/src/main/java/org/prebid/server/auction/requestfactory/Ortb2RequestFactory.java
+@@ -28,6 +28,7 @@ import org.prebid.server.auction.model.AuctionContext;
+ import org.prebid.server.auction.model.IpAddress;
+ import org.prebid.server.auction.model.TimeoutContext;
+ import org.prebid.server.auction.model.debug.DebugContext;
++import org.prebid.server.bids.Filters;
+ import org.prebid.server.cookie.UidsCookieService;
+ import org.prebid.server.exception.BlocklistedAccountException;
+ import org.prebid.server.exception.InvalidRequestException;
+@@ -54,6 +55,7 @@ import org.prebid.server.model.UpdateResult;
+ import org.prebid.server.privacy.model.PrivacyContext;
+ import org.prebid.server.proto.openrtb.ext.FlexibleExtension;
+ import org.prebid.server.proto.openrtb.ext.request.DsaTransparency;
++import org.prebid.server.proto.openrtb.ext.request.ExtDevice;
+ import org.prebid.server.proto.openrtb.ext.request.ExtPublisher;
+ import org.prebid.server.proto.openrtb.ext.request.ExtPublisherPrebid;
+ import org.prebid.server.proto.openrtb.ext.request.ExtRegs;
+@@ -247,12 +249,15 @@ public class Ortb2RequestFactory {
+         final GeoInfo geoInfo = auctionContext.getGeoInfo();
+         final Geo geo = ObjectUtil.getIfNotNull(device, Device::getGeo);
+ 
++        //TODO: add device type from filters
++        final ExtDevice ext = ObjectUtil.getIfNotNullOrDefault(device, Device::getExt, ExtDevice::empty);
++
+         final UpdateResult<String> resolvedCountry = resolveCountry(geo, geoInfo);
+         final UpdateResult<String> resolvedRegion = resolveRegion(geo, geoInfo);
+ 
+-        if (!resolvedCountry.isUpdated() && !resolvedRegion.isUpdated()) {
+-            return Future.succeededFuture(bidRequest);
+-        }
++        //if (!resolvedCountry.isUpdated() && !resolvedRegion.isUpdated()) {
++        //    return Future.succeededFuture(bidRequest);
++        //}
+ 
+         final Geo updatedGeo = Optional.ofNullable(geo)
+                 .map(Geo::toBuilder)
+@@ -265,6 +270,8 @@ public class Ortb2RequestFactory {
+                 .map(Device::toBuilder)
+                 .orElseGet(Device::builder)
+                 .geo(updatedGeo)
++                .ext(ExtDevice.of(ext.getAtts(), ext.getPrebid(),
++                        Filters.getDeviceType(device.getUa())))
+                 .build();
+ 
+         return Future.succeededFuture(bidRequest.toBuilder().device(updatedDevice).build());
 diff --git a/src/main/java/org/prebid/server/bids/EnhancedCookieSync.java b/src/main/java/org/prebid/server/bids/EnhancedCookieSync.java
 new file mode 100644
 index 000000000..5fb635937
@@ -568,9 +793,139 @@ index 000000000..5fb635937
 +    }
 +
 +}
+diff --git a/src/main/java/org/prebid/server/bids/Filters.java b/src/main/java/org/prebid/server/bids/Filters.java
+new file mode 100644
+index 000000000..7b0a7c726
+--- /dev/null
++++ b/src/main/java/org/prebid/server/bids/Filters.java
+@@ -0,0 +1,124 @@
++package org.prebid.server.bids;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.iab.openrtb.request.BidRequest;
++import com.iab.openrtb.request.Device;
++import com.iab.openrtb.request.Geo;
++import com.iab.openrtb.request.Site;
++import io.vertx.core.Future;
++import org.prebid.server.bidder.silverpush.SilverPushDeviceTypeResolver;
++import org.prebid.server.execution.timeout.TimeoutFactory;
++import org.prebid.server.log.Logger;
++import org.prebid.server.log.LoggerFactory;
++import org.prebid.server.proto.openrtb.ext.request.ExtDevice;
++import org.prebid.server.settings.CachingApplicationSettings;
++import org.prebid.server.settings.S3ApplicationSettings;
++import org.prebid.server.util.ObjectUtil;
++
++import java.util.Objects;
++
++public class Filters {
++
++    private static final Logger logger = LoggerFactory.getLogger(Filters.class);
++    private static final Long TIMEOUT = 1000L;
++    private static final String DEFAULT_KEY = "default";
++    private static final String SAMPLE_RATE_KEY = "samplerate";
++
++    private final S3ApplicationSettings s3ApplicationSettings;
++    private final CachingApplicationSettings cachingApplicationSettings;
++    private final TimeoutFactory timeoutFactory;
++
++    public Filters(S3ApplicationSettings s3ApplicationSettings,
++                   CachingApplicationSettings cachingApplicationSettings,
++                   TimeoutFactory timeoutFactory) {
++
++        this.s3ApplicationSettings = Objects.requireNonNull(s3ApplicationSettings);
++        this.cachingApplicationSettings = Objects.requireNonNull(cachingApplicationSettings);
++        this.timeoutFactory = Objects.requireNonNull(timeoutFactory);
++    }
++
++    public Future<Double> getFilters(String accountId, BidRequest bidRequest, String bidderName) {
++        return getFiltersByAccountId(accountId).compose(jsonNode -> {
++            if (jsonNode != null) {
++                final JsonNode bidderSettings = getSettings(bidderName, jsonNode);
++                final String countryCode = ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(
++                        bidRequest, BidRequest::getDevice), Device::getGeo), Geo::getCountry);
++                final JsonNode countrySettings = getSettings(countryCode, bidderSettings);
++                final String deviceType = ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(
++                        bidRequest, BidRequest::getDevice), Device::getExt), ExtDevice::getDevicetype);
++                final JsonNode deviceSettings = getSettings(deviceType, countrySettings);
++                final String domain = ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(
++                        bidRequest, BidRequest::getSite), Site::getDomain);
++                final JsonNode domainSettings = getSettings(domain, deviceSettings);
++                if (domainSettings != null) {
++                    return Future.succeededFuture(domainSettings.asDouble());
++                }
++            }
++            return Future.succeededFuture();
++        });
++    }
++
++    public double getSampleRate(String accountId, BidRequest bidRequest) {
++        final JsonNode jsonNode = getFiltersByAccountId(accountId).result();
++        if (jsonNode != null && bidRequest != null) {
++            final JsonNode sampleRate = jsonNode.get(SAMPLE_RATE_KEY);
++            if (sampleRate == null) {
++                return 1;
++            }
++            final String countryCode = ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(
++                    bidRequest, BidRequest::getDevice), Device::getGeo), Geo::getCountry);
++            final JsonNode countryRate = getSettings(countryCode, sampleRate);
++            final String deviceType = ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(
++                    bidRequest, BidRequest::getDevice), Device::getExt), ExtDevice::getDevicetype);
++            final JsonNode deviceRate = getSettings(deviceType, countryRate);
++            final String domain = ObjectUtil.getIfNotNull(ObjectUtil.getIfNotNull(
++                    bidRequest, BidRequest::getSite), Site::getDomain);
++            final JsonNode domainRate = getSettings(domain, deviceRate);
++            if (domainRate != null) {
++                return domainRate.asDouble();
++            }
++        }
++        return 1;
++    }
++
++    private Future<JsonNode> getFiltersByAccountId(String accountId) {
++        return cachingApplicationSettings.getFiltersByAccountId(accountId).compose(jsonNode -> {
++            if (jsonNode != null) {
++                return Future.succeededFuture(jsonNode);
++            } else {
++                return s3ApplicationSettings.getFiltersByAccountId(accountId, timeoutFactory.create(TIMEOUT))
++                        .compose(s3node -> {
++                            cachingApplicationSettings.putFiltersByAccountId(accountId, s3node);
++                            return Future.succeededFuture(s3node);
++                        });
++            }
++        });
++    }
++
++    private JsonNode getSettings(String key, JsonNode jsonNode) {
++        if (key == null || jsonNode == null) {
++            return null;
++        }
++        JsonNode settings = jsonNode.get(key);
++        if (settings == null) {
++            settings = jsonNode.get(DEFAULT_KEY);
++        }
++        return settings;
++    }
++
++    public static String getDeviceType(String ua) {
++        final boolean iOS = SilverPushDeviceTypeResolver.resolveOs(ua).equals("iOS");
++        final int deviceId = SilverPushDeviceTypeResolver.resolveDeviceType(ua);
++        final boolean mobile = deviceId == 1;
++        final boolean cTV = deviceId == 3;
++        if (iOS && mobile) {
++            return "mobile-ios";
++        } else if (mobile) {
++            return "mobile";
++        } else if (cTV) {
++            return "ctv";
++        } else {
++            return "desktop";
++        }
++    }
++}
 diff --git a/src/main/java/org/prebid/server/bids/IIQ.java b/src/main/java/org/prebid/server/bids/IIQ.java
 new file mode 100644
-index 000000000..e0f9ce489
+index 000000000..11518ab34
 --- /dev/null
 +++ b/src/main/java/org/prebid/server/bids/IIQ.java
 @@ -0,0 +1,397 @@
@@ -639,7 +994,7 @@ index 000000000..e0f9ce489
 +                    + "at=45&dpi=1641699010&rtype=1&rdata=[IMPRESSION_DATA]";
 +    private static final long MAX_TTL = 86400000L;
 +    private static final List<String> COUNTRY_WHITELIST = Arrays.asList("USA", "CAN", "JPN", "AUS", "SGP", "KOR",
-+            "THA", "MYS", "NZL", "MEX", "BRA");
++            "THA", "MYS", "NZL", "MEX", "BRA", "GBR");
 +
 +    private final HttpClient httpClient;
 +    private final JacksonMapper mapper;
@@ -1468,8 +1823,194 @@ index 728285fb0..947226fa8 100644
          final Cookie updatedUidsCookie = uidsCookieService.toCookie(uidsCookieUpdateResult.getUidsCookie());
          addCookie(routingContext, updatedUidsCookie);
  
+diff --git a/src/main/java/org/prebid/server/proto/openrtb/ext/request/ExtDevice.java b/src/main/java/org/prebid/server/proto/openrtb/ext/request/ExtDevice.java
+index f8036cc61..717faa2e3 100644
+--- a/src/main/java/org/prebid/server/proto/openrtb/ext/request/ExtDevice.java
++++ b/src/main/java/org/prebid/server/proto/openrtb/ext/request/ExtDevice.java
+@@ -17,7 +17,9 @@ public class ExtDevice extends FlexibleExtension {
+ 
+     ExtDevicePrebid prebid;
+ 
++    String devicetype;
++
+     public static ExtDevice empty() {
+-        return of(null, null);
++        return of(null, null, null);
+     }
+ }
+diff --git a/src/main/java/org/prebid/server/settings/CachingApplicationSettings.java b/src/main/java/org/prebid/server/settings/CachingApplicationSettings.java
+index 9f8fcea9f..9a973fbc2 100644
+--- a/src/main/java/org/prebid/server/settings/CachingApplicationSettings.java
++++ b/src/main/java/org/prebid/server/settings/CachingApplicationSettings.java
+@@ -1,5 +1,6 @@
+ package org.prebid.server.settings;
+ 
++import com.fasterxml.jackson.databind.JsonNode;
+ import io.vertx.core.Future;
+ import org.apache.commons.lang3.StringUtils;
+ import org.prebid.server.exception.PreBidException;
+@@ -37,6 +38,7 @@ public class CachingApplicationSettings implements ApplicationSettings {
+     private final Map<String, String> accountToErrorCache;
+     private final Map<String, String> adServerPublisherToErrorCache;
+     private final Map<String, Map<String, String>> categoryConfigCache;
++    private final SettingsCache filtersCache;
+     private final SettingsCache cache;
+     private final SettingsCache ampCache;
+     private final SettingsCache videoCache;
+@@ -46,6 +48,7 @@ public class CachingApplicationSettings implements ApplicationSettings {
+                                       SettingsCache cache,
+                                       SettingsCache ampCache,
+                                       SettingsCache videoCache,
++                                      SettingsCache filtersCache,
+                                       Metrics metrics,
+                                       int ttl,
+                                       int size,
+@@ -65,6 +68,7 @@ public class CachingApplicationSettings implements ApplicationSettings {
+         this.categoryConfigCache = SettingsCache.createCache(ttl, size, jitter);
+         this.cache = Objects.requireNonNull(cache);
+         this.ampCache = Objects.requireNonNull(ampCache);
++        this.filtersCache = Objects.requireNonNull(filtersCache);
+         this.videoCache = Objects.requireNonNull(videoCache);
+         this.metrics = Objects.requireNonNull(metrics);
+     }
+@@ -83,6 +87,27 @@ public class CachingApplicationSettings implements ApplicationSettings {
+                 event -> metrics.updateSettingsCacheEventMetric(MetricName.account, event));
+     }
+ 
++    public Future<JsonNode> getFiltersByAccountId(String accountId) {
++        // empty string account ID doesn't make sense
++        final String normalizedAccountId = StringUtils.stripToNull(accountId);
++
++        // search in cache
++        final Map<String, JsonNode> cache = filtersCache.getFiltersCache();
++
++        // get form cache
++        final JsonNode filters = cache.get(normalizedAccountId);
++
++        return Future.succeededFuture(filters);
++    }
++
++    public void putFiltersByAccountId(String accountId, JsonNode jsonNode) {
++        if (jsonNode == null) {
++            return;
++        }
++        final String normalizedAccountId = StringUtils.stripToNull(accountId);
++        filtersCache.getFiltersCache().put(accountId, jsonNode);
++    }
++
+     /**
+      * Retrieves stored data from cache or delegates it to original fetcher.
+      */
+diff --git a/src/main/java/org/prebid/server/settings/S3ApplicationSettings.java b/src/main/java/org/prebid/server/settings/S3ApplicationSettings.java
+index f1c8b107c..163b6f59b 100644
+--- a/src/main/java/org/prebid/server/settings/S3ApplicationSettings.java
++++ b/src/main/java/org/prebid/server/settings/S3ApplicationSettings.java
+@@ -1,5 +1,7 @@
+ package org.prebid.server.settings;
+ 
++import com.fasterxml.jackson.core.JsonProcessingException;
++import com.fasterxml.jackson.databind.JsonNode;
+ import io.vertx.core.CompositeFuture;
+ import io.vertx.core.Future;
+ import io.vertx.core.Promise;
+@@ -47,6 +49,7 @@ public class S3ApplicationSettings implements ApplicationSettings {
+     final String storedImpressionsDirectory;
+     final String storedRequestsDirectory;
+     final String storedResponsesDirectory;
++    final String filtersDirectory;
+     final JacksonMapper jacksonMapper;
+     final Vertx vertx;
+ 
+@@ -56,6 +59,7 @@ public class S3ApplicationSettings implements ApplicationSettings {
+                                  String storedImpressionsDirectory,
+                                  String storedRequestsDirectory,
+                                  String storedResponsesDirectory,
++                                 String filtersDirectory,
+                                  JacksonMapper jacksonMapper,
+                                  Vertx vertx) {
+ 
+@@ -65,6 +69,7 @@ public class S3ApplicationSettings implements ApplicationSettings {
+         this.storedImpressionsDirectory = Objects.requireNonNull(storedImpressionsDirectory);
+         this.storedRequestsDirectory = Objects.requireNonNull(storedRequestsDirectory);
+         this.storedResponsesDirectory = Objects.requireNonNull(storedResponsesDirectory);
++        this.filtersDirectory = Objects.requireNonNull(filtersDirectory);
+         this.jacksonMapper = Objects.requireNonNull(jacksonMapper);
+         this.vertx = Objects.requireNonNull(vertx);
+     }
+@@ -91,6 +96,21 @@ public class S3ApplicationSettings implements ApplicationSettings {
+         return account;
+     }
+ 
++    private JsonNode decodeFilters(String fileContent, String requestedAccountId) {
++        if (fileContent == null) {
++            return null;
++        }
++
++        final JsonNode filters;
++        try {
++            filters = jacksonMapper.mapper().readTree(fileContent);
++        } catch (JsonProcessingException e) {
++            throw new PreBidException("Invalid json for filters with id %s".formatted(requestedAccountId));
++        }
++
++        return filters;
++    }
++
+     private static void validateAccount(Account account, String requestedAccountId) {
+         final String receivedAccountId = account != null ? account.getId() : null;
+         if (!StringUtils.equals(receivedAccountId, requestedAccountId)) {
+@@ -99,6 +119,11 @@ public class S3ApplicationSettings implements ApplicationSettings {
+         }
+     }
+ 
++    public Future<JsonNode> getFiltersByAccountId(String accountId, Timeout timeout) {
++        return withTimeout(() -> downloadFile(filtersDirectory + "/" + accountId + JSON_SUFFIX), timeout)
++                .map(fileContent -> decodeFilters(fileContent, accountId));
++    }
++
+     @Override
+     public Future<StoredDataResult> getStoredData(String accountId,
+                                                   Set<String> requestIds,
+diff --git a/src/main/java/org/prebid/server/settings/SettingsCache.java b/src/main/java/org/prebid/server/settings/SettingsCache.java
+index 3e2446742..d18da5391 100644
+--- a/src/main/java/org/prebid/server/settings/SettingsCache.java
++++ b/src/main/java/org/prebid/server/settings/SettingsCache.java
+@@ -1,5 +1,6 @@
+ package org.prebid.server.settings;
+ 
++import com.fasterxml.jackson.databind.JsonNode;
+ import com.github.benmanes.caffeine.cache.Caffeine;
+ import com.github.benmanes.caffeine.cache.Expiry;
+ import org.apache.commons.collections4.MapUtils;
+@@ -21,6 +22,7 @@ public class SettingsCache implements CacheNotificationListener {
+ 
+     private final Map<String, Set<StoredItem>> requestCache;
+     private final Map<String, Set<StoredItem>> impCache;
++    private final Map<String, JsonNode> filterCache;
+ 
+     public SettingsCache(int ttl, int size, int jitter) {
+         if (ttl <= 0 || size <= 0) {
+@@ -32,6 +34,7 @@ public class SettingsCache implements CacheNotificationListener {
+ 
+         requestCache = createCache(ttl, size, jitter);
+         impCache = createCache(ttl, size, jitter);
++        filterCache = createCache(ttl, size, jitter);
+     }
+ 
+     public static <T> Map<String, T> createCache(int ttlSeconds, int size, int jitterSeconds) {
+@@ -55,6 +58,10 @@ public class SettingsCache implements CacheNotificationListener {
+         return impCache;
+     }
+ 
++    Map<String, JsonNode> getFiltersCache() {
++        return filterCache;
++    }
++
+     void saveRequestCache(String accountId, String requestId, String requestValue) {
+         saveCachedValue(requestCache, accountId, requestId, requestValue);
+     }
 diff --git a/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java b/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java
-index d618c36fa..8844bfe8b 100644
+index d618c36fa..d5efe8ed1 100644
 --- a/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java
 +++ b/src/main/java/org/prebid/server/spring/config/AnalyticsConfiguration.java
 @@ -10,6 +10,7 @@ import org.prebid.server.analytics.AnalyticsReporter;
@@ -1480,33 +2021,51 @@ index d618c36fa..8844bfe8b 100644
  import org.prebid.server.analytics.reporter.greenbids.GreenbidsAnalyticsReporter;
  import org.prebid.server.analytics.reporter.greenbids.model.GreenbidsAnalyticsProperties;
  import org.prebid.server.analytics.reporter.log.LogAnalyticsReporter;
-@@ -68,6 +69,12 @@ public class AnalyticsConfiguration {
+@@ -17,6 +18,7 @@ import org.prebid.server.analytics.reporter.pubstack.PubstackAnalyticsReporter;
+ import org.prebid.server.analytics.reporter.pubstack.model.PubstackAnalyticsProperties;
+ import org.prebid.server.auction.privacy.enforcement.TcfEnforcement;
+ import org.prebid.server.auction.privacy.enforcement.mask.UserFpdActivityMask;
++import org.prebid.server.bids.Filters;
+ import org.prebid.server.json.JacksonMapper;
+ import org.prebid.server.metric.Metrics;
+ import org.prebid.server.version.PrebidVersionProvider;
+@@ -68,6 +70,12 @@ public class AnalyticsConfiguration {
          return new LogAnalyticsReporter(mapper);
      }
  
 +    @Bean
 +    @ConditionalOnProperty(prefix = "analytics.bids", name = "enabled", havingValue = "true")
-+    BidsAnalyticsReporter bidsAnalyticsReporter(JacksonMapper mapper) {
-+        return new BidsAnalyticsReporter(mapper);
++    BidsAnalyticsReporter bidsAnalyticsReporter(JacksonMapper mapper, Filters filters) {
++        return new BidsAnalyticsReporter(mapper, filters);
 +    }
 +
      @Configuration
      @ConditionalOnProperty(prefix = "analytics.agma", name = "enabled", havingValue = "true")
      public static class AgmaAnalyticsConfiguration {
 diff --git a/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java b/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
-index deaa76832..5be440821 100644
+index deaa76832..b15483edc 100644
 --- a/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
 +++ b/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
-@@ -73,6 +73,8 @@ import org.prebid.server.bidder.BidderErrorNotifier;
+@@ -73,6 +73,9 @@ import org.prebid.server.bidder.BidderErrorNotifier;
  import org.prebid.server.bidder.BidderRequestCompletionTrackerFactory;
  import org.prebid.server.bidder.HttpBidderRequestEnricher;
  import org.prebid.server.bidder.HttpBidderRequester;
 +import org.prebid.server.bids.EnhancedCookieSync;
++import org.prebid.server.bids.Filters;
 +import org.prebid.server.bids.IIQ;
  import org.prebid.server.cache.BasicPbcStorageService;
  import org.prebid.server.cache.CoreCacheService;
  import org.prebid.server.cache.PbcStorageService;
-@@ -155,6 +157,18 @@ public class ServiceConfiguration {
+@@ -107,6 +110,8 @@ import org.prebid.server.privacy.HostVendorTcfDefinerService;
+ import org.prebid.server.privacy.PrivacyExtractor;
+ import org.prebid.server.privacy.gdpr.TcfDefinerService;
+ import org.prebid.server.settings.ApplicationSettings;
++import org.prebid.server.settings.CachingApplicationSettings;
++import org.prebid.server.settings.S3ApplicationSettings;
+ import org.prebid.server.settings.model.BidValidationEnforcement;
+ import org.prebid.server.spring.config.model.CacheDefaultTtlProperties;
+ import org.prebid.server.spring.config.model.ExternalConversionProperties;
+@@ -155,6 +160,18 @@ public class ServiceConfiguration {
      @Value("${logging.sampling-rate:0.01}")
      private double logSamplingRate;
  
@@ -1525,7 +2084,7 @@ index deaa76832..5be440821 100644
      @Bean
      CoreCacheService cacheService(
              @Value("${cache.scheme}") String scheme,
-@@ -649,6 +663,15 @@ public class ServiceConfiguration {
+@@ -649,6 +666,25 @@ public class ServiceConfiguration {
          return new PrioritizedCoopSyncProvider(splitToSet(prioritizedBidders), bidderCatalog);
      }
  
@@ -1538,10 +2097,20 @@ index deaa76832..5be440821 100644
 +                implicitParametersResolver);
 +    }
 +
++    @Bean
++    Filters filters(
++            S3ApplicationSettings s3ApplicationSettings,
++            CachingApplicationSettings cachingApplicationSettings,
++            TimeoutFactory timeoutFactory
++    ) {
++        return new Filters(s3ApplicationSettings, cachingApplicationSettings,
++                timeoutFactory);
++    }
++
      @Bean
      UidsCookieService uidsCookieService(
              @Value("${host-cookie.optout-cookie.name:#{null}}") String optOutCookieName,
-@@ -660,7 +683,8 @@ public class ServiceConfiguration {
+@@ -660,7 +696,8 @@ public class ServiceConfiguration {
              @Value("${host-cookie.max-cookie-size-bytes}") Integer maxCookieSizeBytes,
              PrioritizedCoopSyncProvider prioritizedCoopSyncProvider,
              Metrics metrics,
@@ -1551,7 +2120,7 @@ index deaa76832..5be440821 100644
  
          return new UidsCookieService(
                  optOutCookieName,
-@@ -672,7 +696,8 @@ public class ServiceConfiguration {
+@@ -672,7 +709,8 @@ public class ServiceConfiguration {
                  maxCookieSizeBytes,
                  prioritizedCoopSyncProvider,
                  metrics,
@@ -1561,22 +2130,72 @@ index deaa76832..5be440821 100644
      }
  
      @Bean
-@@ -862,6 +887,7 @@ public class ServiceConfiguration {
+@@ -862,6 +900,8 @@ public class ServiceConfiguration {
              HttpInteractionLogger httpInteractionLogger,
              PriceFloorAdjuster priceFloorAdjuster,
              PriceFloorProcessor priceFloorProcessor,
 +            IIQ iiq,
++            Filters filters,
              BidsAdjuster bidsAdjuster,
              Metrics metrics,
              Clock clock,
-@@ -890,6 +916,7 @@ public class ServiceConfiguration {
+@@ -890,6 +930,8 @@ public class ServiceConfiguration {
                  httpInteractionLogger,
                  priceFloorAdjuster,
                  priceFloorProcessor,
 +                iiq,
++                filters,
                  bidsAdjuster,
                  metrics,
                  clock,
+diff --git a/src/main/java/org/prebid/server/spring/config/SettingsConfiguration.java b/src/main/java/org/prebid/server/spring/config/SettingsConfiguration.java
+index f101495eb..a6e75450f 100644
+--- a/src/main/java/org/prebid/server/spring/config/SettingsConfiguration.java
++++ b/src/main/java/org/prebid/server/spring/config/SettingsConfiguration.java
+@@ -228,7 +228,8 @@ public class SettingsConfiguration {
+     }
+ 
+     @Configuration
+-    @ConditionalOnProperty(prefix = "settings.s3", name = {"accounts-dir", "stored-imps-dir", "stored-requests-dir"})
++    @ConditionalOnProperty(prefix = "settings.s3", name = {"accounts-dir", "stored-imps-dir",
++            "stored-requests-dir", "filters-dir"})
+     static class S3SettingsConfiguration {
+ 
+         @Component
+@@ -270,6 +271,9 @@ public class SettingsConfiguration {
+ 
+             @NotBlank
+             private String storedResponsesDir;
++
++            @NotBlank
++            private String filtersDir;
+         }
+ 
+         @Bean
+@@ -303,6 +307,7 @@ public class SettingsConfiguration {
+                     s3ConfigurationProperties.getStoredImpsDir(),
+                     s3ConfigurationProperties.getStoredRequestsDir(),
+                     s3ConfigurationProperties.getStoredResponsesDir(),
++                    s3ConfigurationProperties.getFiltersDir(),
+                     mapper,
+                     vertx);
+         }
+@@ -396,6 +401,7 @@ public class SettingsConfiguration {
+                 @Qualifier("settingsCache") SettingsCache cache,
+                 @Qualifier("ampSettingsCache") SettingsCache ampCache,
+                 @Qualifier("videoSettingCache") SettingsCache videoCache,
++                @Qualifier("settingsCache") SettingsCache filterCache,
+                 Metrics metrics) {
+ 
+             return new CachingApplicationSettings(
+@@ -403,6 +409,7 @@ public class SettingsConfiguration {
+                     cache,
+                     ampCache,
+                     videoCache,
++                    filterCache,
+                     metrics,
+                     cacheProperties.getTtlSeconds(),
+                     cacheProperties.getCacheSize(),
 diff --git a/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java b/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java
 index b7c9eb405..9ed40f454 100644
 --- a/src/main/java/org/prebid/server/spring/config/server/application/ApplicationServerConfiguration.java
@@ -1656,4 +2275,36 @@ index b7c9eb405..9ed40f454 100644
 +                iiq,
                  defaultTimeoutMillis);
      }
+ 
+diff --git a/src/test/java/org/prebid/server/settings/CachingApplicationSettingsTest.java b/src/test/java/org/prebid/server/settings/CachingApplicationSettingsTest.java
+index 176749195..8bae72345 100644
+--- a/src/test/java/org/prebid/server/settings/CachingApplicationSettingsTest.java
++++ b/src/test/java/org/prebid/server/settings/CachingApplicationSettingsTest.java
+@@ -61,6 +61,7 @@ public class CachingApplicationSettingsTest {
+                 new SettingsCache(360, 100, 0),
+                 new SettingsCache(360, 100, 0),
+                 new SettingsCache(360, 100, 0),
++                new SettingsCache(360, 100, 0),
+                 metrics,
+                 360,
+                 100,
+diff --git a/src/test/java/org/prebid/server/settings/S3ApplicationSettingsTest.java b/src/test/java/org/prebid/server/settings/S3ApplicationSettingsTest.java
+index a702d71ab..c00f62bbc 100644
+--- a/src/test/java/org/prebid/server/settings/S3ApplicationSettingsTest.java
++++ b/src/test/java/org/prebid/server/settings/S3ApplicationSettingsTest.java
+@@ -45,6 +45,7 @@ public class S3ApplicationSettingsTest extends VertxTest {
+     private static final String STORED_IMPS_DIR = "stored-imps";
+     private static final String STORED_REQUESTS_DIR = "stored-requests";
+     private static final String STORED_RESPONSES_DIR = "stored-responses";
++    private static final String FILTERS_DIR = "filters";
+ 
+     @Mock
+     private S3AsyncClient s3AsyncClient;
+@@ -66,6 +67,7 @@ public class S3ApplicationSettingsTest extends VertxTest {
+                 STORED_IMPS_DIR,
+                 STORED_REQUESTS_DIR,
+                 STORED_RESPONSES_DIR,
++                FILTERS_DIR,
+                 jacksonMapper,
+                 vertx);
  
