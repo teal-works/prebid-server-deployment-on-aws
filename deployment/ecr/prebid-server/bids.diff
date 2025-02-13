@@ -266,10 +266,10 @@ index 000000000..8440ed332
 +    T event;
 +}
 diff --git a/src/main/java/org/prebid/server/auction/BidResponseCreator.java b/src/main/java/org/prebid/server/auction/BidResponseCreator.java
-index 86fe28fdc..5166f3c85 100644
+index 4242281a5..33d529499 100644
 --- a/src/main/java/org/prebid/server/auction/BidResponseCreator.java
 +++ b/src/main/java/org/prebid/server/auction/BidResponseCreator.java
-@@ -42,6 +42,7 @@ import org.prebid.server.bidder.model.BidderBid;
+@@ -43,6 +43,7 @@ import org.prebid.server.bidder.model.BidderBid;
  import org.prebid.server.bidder.model.BidderError;
  import org.prebid.server.bidder.model.BidderSeatBid;
  import org.prebid.server.bidder.model.BidderSeatBidInfo;
@@ -277,35 +277,38 @@ index 86fe28fdc..5166f3c85 100644
  import org.prebid.server.cache.CoreCacheService;
  import org.prebid.server.cache.model.CacheContext;
  import org.prebid.server.cache.model.CacheInfo;
-@@ -207,21 +208,34 @@ public class BidResponseCreator {
+@@ -227,6 +228,18 @@ public class BidResponseCreator {
          return Future.succeededFuture(bidResponse);
      }
  
 +    Future<BidResponse> create(AuctionContext auctionContext,
 +                               BidRequestCacheInfo cacheInfo,
++                               BidderAliases aliases,
 +                               Map<String, MultiBidConfig> bidderToMultiBids,
 +                               IIQ.State state) {
 +
 +        return videoStoredDataResult(auctionContext)
-+                .compose(videoStoredData -> create(videoStoredData, auctionContext, cacheInfo,
-+                        bidderToMultiBids, state))
++                .compose(videoStoredData ->
++                        create(videoStoredData, auctionContext, cacheInfo, aliases, bidderToMultiBids, state))
 +                .map(bidResponse -> populateSeatNonBid(auctionContext, bidResponse));
 +    }
 +
      Future<BidResponse> create(AuctionContext auctionContext,
                                 BidRequestCacheInfo cacheInfo,
-                                Map<String, MultiBidConfig> bidderToMultiBids) {
+                                BidderAliases aliases,
+@@ -234,7 +247,7 @@ public class BidResponseCreator {
  
          return videoStoredDataResult(auctionContext)
--                .compose(videoStoredData -> create(videoStoredData, auctionContext, cacheInfo, bidderToMultiBids))
-+                .compose(videoStoredData -> create(videoStoredData, auctionContext, cacheInfo,
-+                        bidderToMultiBids, null))
+                 .compose(videoStoredData ->
+-                        create(videoStoredData, auctionContext, cacheInfo, aliases, bidderToMultiBids))
++                        create(videoStoredData, auctionContext, cacheInfo, aliases, bidderToMultiBids, null))
                  .map(bidResponse -> populateSeatNonBid(auctionContext, bidResponse));
      }
  
-     private Future<BidResponse> create(VideoStoredDataResult videoStoredDataResult,
+@@ -242,9 +255,10 @@ public class BidResponseCreator {
                                         AuctionContext auctionContext,
                                         BidRequestCacheInfo cacheInfo,
+                                        BidderAliases aliases,
 -                                       Map<String, MultiBidConfig> bidderToMultiBids) {
 +                                       Map<String, MultiBidConfig> bidderToMultiBids,
 +                                       IIQ.State state) {
@@ -315,7 +318,7 @@ index 86fe28fdc..5166f3c85 100644
  
          final List<BidderResponse> bidderResponses = auctionContext.getAuctionParticipations().stream()
                  .filter(auctionParticipation -> !auctionParticipation.isRequestBlocked())
-@@ -296,6 +310,9 @@ public class BidResponseCreator {
+@@ -320,6 +334,9 @@ public class BidResponseCreator {
                          bid,
                          bidType,
                          bidder,
@@ -325,7 +328,7 @@ index 86fe28fdc..5166f3c85 100644
                          account,
                          videoStoredDataResult,
                          eventsContext,
-@@ -328,6 +345,9 @@ public class BidResponseCreator {
+@@ -352,6 +369,9 @@ public class BidResponseCreator {
      private ObjectNode updateBidExt(Bid bid,
                                      BidType bidType,
                                      String bidder,
@@ -335,7 +338,7 @@ index 86fe28fdc..5166f3c85 100644
                                      Account account,
                                      VideoStoredDataResult videoStoredDataResult,
                                      EventsContext eventsContext,
-@@ -338,6 +358,9 @@ public class BidResponseCreator {
+@@ -362,6 +382,9 @@ public class BidResponseCreator {
                  bid,
                  bidType,
                  bidder,
@@ -345,7 +348,7 @@ index 86fe28fdc..5166f3c85 100644
                  account,
                  videoStoredDataResult,
                  eventsContext,
-@@ -359,6 +382,9 @@ public class BidResponseCreator {
+@@ -383,6 +406,9 @@ public class BidResponseCreator {
      private ExtBidPrebid updateBidExtPrebid(Bid bid,
                                              BidType bidType,
                                              String bidder,
@@ -355,7 +358,7 @@ index 86fe28fdc..5166f3c85 100644
                                              Account account,
                                              VideoStoredDataResult videoStoredDataResult,
                                              EventsContext eventsContext,
-@@ -366,7 +392,8 @@ public class BidResponseCreator {
+@@ -390,7 +416,8 @@ public class BidResponseCreator {
                                              String effectiveBidId) {
  
          final Video storedVideo = videoStoredDataResult.getImpIdToStoredVideo().get(bid.getImpid());
@@ -365,7 +368,7 @@ index 86fe28fdc..5166f3c85 100644
          final ExtBidPrebidVideo extBidPrebidVideo = getExtBidPrebidVideo(bid.getExt()).orElse(null);
  
          final ExtBidPrebid.ExtBidPrebidBuilder extBidPrebidBuilder = getExtPrebid(bid.getExt(), ExtBidPrebid.class)
-@@ -1473,13 +1500,14 @@ public class BidResponseCreator {
+@@ -1639,13 +1666,14 @@ public class BidResponseCreator {
                  .orElse(com.iab.openrtb.request.Asset.EMPTY);
      }
  
@@ -381,7 +384,7 @@ index 86fe28fdc..5166f3c85 100644
                  .build();
      }
  
-@@ -1554,6 +1582,9 @@ public class BidResponseCreator {
+@@ -1720,6 +1748,9 @@ public class BidResponseCreator {
      }
  
      private Events createEvents(String bidder,
@@ -391,7 +394,7 @@ index 86fe28fdc..5166f3c85 100644
                                  Account account,
                                  String bidId,
                                  EventsContext eventsContext) {
-@@ -1562,6 +1593,9 @@ public class BidResponseCreator {
+@@ -1728,6 +1759,9 @@ public class BidResponseCreator {
                  ? eventsService.createEvent(
                  bidId,
                  bidder,
@@ -402,10 +405,10 @@ index 86fe28fdc..5166f3c85 100644
                  true,
                  eventsContext)
 diff --git a/src/main/java/org/prebid/server/auction/ExchangeService.java b/src/main/java/org/prebid/server/auction/ExchangeService.java
-index 40c8ff86b..e89d95cd1 100644
+index 56cd81925..3542573ad 100644
 --- a/src/main/java/org/prebid/server/auction/ExchangeService.java
 +++ b/src/main/java/org/prebid/server/auction/ExchangeService.java
-@@ -54,6 +54,8 @@ import org.prebid.server.bidder.model.BidderBid;
+@@ -53,6 +53,8 @@ import org.prebid.server.bidder.model.BidderBid;
  import org.prebid.server.bidder.model.BidderError;
  import org.prebid.server.bidder.model.BidderSeatBid;
  import org.prebid.server.bidder.model.Price;
@@ -413,8 +416,8 @@ index 40c8ff86b..e89d95cd1 100644
 +import org.prebid.server.bids.IIQ;
  import org.prebid.server.cookie.UidsCookie;
  import org.prebid.server.exception.InvalidRequestException;
- import org.prebid.server.exception.PreBidException;
-@@ -147,6 +149,8 @@ public class ExchangeService {
+ import org.prebid.server.execution.timeout.Timeout;
+@@ -145,6 +147,8 @@ public class ExchangeService {
      private final HttpInteractionLogger httpInteractionLogger;
      private final PriceFloorAdjuster priceFloorAdjuster;
      private final PriceFloorProcessor priceFloorProcessor;
@@ -423,7 +426,7 @@ index 40c8ff86b..e89d95cd1 100644
      private final BidsAdjuster bidsAdjuster;
      private final Metrics metrics;
      private final Clock clock;
-@@ -174,6 +178,8 @@ public class ExchangeService {
+@@ -172,6 +176,8 @@ public class ExchangeService {
                             HttpInteractionLogger httpInteractionLogger,
                             PriceFloorAdjuster priceFloorAdjuster,
                             PriceFloorProcessor priceFloorProcessor,
@@ -432,7 +435,7 @@ index 40c8ff86b..e89d95cd1 100644
                             BidsAdjuster bidsAdjuster,
                             Metrics metrics,
                             Clock clock,
-@@ -201,6 +207,8 @@ public class ExchangeService {
+@@ -199,6 +205,8 @@ public class ExchangeService {
          this.httpInteractionLogger = Objects.requireNonNull(httpInteractionLogger);
          this.priceFloorAdjuster = Objects.requireNonNull(priceFloorAdjuster);
          this.priceFloorProcessor = Objects.requireNonNull(priceFloorProcessor);
@@ -441,7 +444,7 @@ index 40c8ff86b..e89d95cd1 100644
          this.bidsAdjuster = Objects.requireNonNull(bidsAdjuster);
          this.metrics = Objects.requireNonNull(metrics);
          this.clock = Objects.requireNonNull(clock);
-@@ -240,6 +248,8 @@ public class ExchangeService {
+@@ -238,6 +246,8 @@ public class ExchangeService {
          final Map<String, MultiBidConfig> bidderToMultiBid = bidderToMultiBids(bidRequest, debugWarnings);
          receivedContext.getBidRejectionTrackers().putAll(makeBidRejectionTrackers(bidRequest, aliases));
  
@@ -450,7 +453,7 @@ index 40c8ff86b..e89d95cd1 100644
          final boolean debugEnabled = receivedContext.getDebugContext().isDebugEnabled();
          metrics.updateDebugRequestMetrics(debugEnabled);
          metrics.updateAccountDebugRequestMetrics(account, debugEnabled);
-@@ -247,7 +257,8 @@ public class ExchangeService {
+@@ -245,7 +255,8 @@ public class ExchangeService {
          return storedResponseProcessor.getStoredResponseResult(bidRequest.getImp(), timeout)
                  .map(storedResponseResult -> populateStoredResponse(storedResponseResult, storedAuctionResponses))
                  .compose(storedResponseResult ->
@@ -460,16 +463,16 @@ index 40c8ff86b..e89d95cd1 100644
                                  .map(receivedContext::with))
  
                  .map(context -> updateRequestMetric(context, uidsCookie, aliases, account, requestTypeMetric))
-@@ -275,7 +286,7 @@ public class ExchangeService {
+@@ -273,7 +284,7 @@ public class ExchangeService {
                          .map(auctionParticipations -> updateResponsesMetrics(auctionParticipations, account, aliases))
                          .map(context::with))
                  // produce response from bidder results
--                .compose(context -> bidResponseCreator.create(context, cacheInfo, bidderToMultiBid)
-+                .compose(context -> bidResponseCreator.create(context, cacheInfo, bidderToMultiBid, state)
+-                .compose(context -> bidResponseCreator.create(context, cacheInfo, aliases, bidderToMultiBid)
++                .compose(context -> bidResponseCreator.create(context, cacheInfo, aliases, bidderToMultiBid, state)
                          .map(bidResponse -> criteriaLogManager.traceResponse(
                                  logger,
                                  bidResponse,
-@@ -429,7 +440,8 @@ public class ExchangeService {
+@@ -427,7 +438,8 @@ public class ExchangeService {
              AuctionContext context,
              StoredResponseResult storedResponseResult,
              BidderAliases aliases,
@@ -479,7 +482,7 @@ index 40c8ff86b..e89d95cd1 100644
  
          final List<Imp> imps = storedResponseResult.getRequiredRequestImps().stream()
                  .filter(imp -> bidderParamsFromImpExt(imp.getExt()) != null)
-@@ -449,7 +461,8 @@ public class ExchangeService {
+@@ -447,7 +459,8 @@ public class ExchangeService {
                  aliases,
                  impBidderToStoredBidResponse,
                  imps,
@@ -489,7 +492,7 @@ index 40c8ff86b..e89d95cd1 100644
      }
  
      private Set<String> bidderNamesFromImpExt(Imp imp, BidderAliases aliases) {
-@@ -484,7 +497,8 @@ public class ExchangeService {
+@@ -482,7 +495,8 @@ public class ExchangeService {
              BidderAliases aliases,
              Map<String, Map<String, String>> impBidderToStoredResponse,
              List<Imp> imps,
@@ -499,7 +502,7 @@ index 40c8ff86b..e89d95cd1 100644
  
          final BidRequest bidRequest = context.getBidRequest();
          final ExtRequest requestExt = bidRequest.getExt();
-@@ -503,7 +517,8 @@ public class ExchangeService {
+@@ -501,7 +515,8 @@ public class ExchangeService {
                          bidderToMultiBid,
                          biddersToConfigs,
                          aliases,
@@ -509,7 +512,7 @@ index 40c8ff86b..e89d95cd1 100644
      }
  
      private Map<String, ExtBidderConfigOrtb> getBiddersToConfigs(ExtRequestPrebid prebid) {
-@@ -641,7 +656,8 @@ public class ExchangeService {
+@@ -639,7 +654,8 @@ public class ExchangeService {
              Map<String, MultiBidConfig> bidderToMultiBid,
              Map<String, ExtBidderConfigOrtb> biddersToConfigs,
              BidderAliases aliases,
@@ -519,7 +522,7 @@ index 40c8ff86b..e89d95cd1 100644
  
          final Map<String, JsonNode> bidderToPrebidBidders = bidderToPrebidBidders(bidRequest);
          final List<AuctionParticipation> bidderRequests = bidderPrivacyResults.stream()
-@@ -656,7 +672,8 @@ public class ExchangeService {
+@@ -654,7 +670,8 @@ public class ExchangeService {
                          biddersToConfigs,
                          bidderToPrebidBidders,
                          aliases,
@@ -529,7 +532,7 @@ index 40c8ff86b..e89d95cd1 100644
                  // Can't be removed after we prepare workflow to filter blocked
                  .filter(auctionParticipation -> !auctionParticipation.isRequestBlocked())
                  .collect(Collectors.toCollection(ArrayList::new));
-@@ -693,7 +710,8 @@ public class ExchangeService {
+@@ -691,7 +708,8 @@ public class ExchangeService {
              Map<String, ExtBidderConfigOrtb> biddersToConfigs,
              Map<String, JsonNode> bidderToPrebidBidders,
              BidderAliases bidderAliases,
@@ -539,7 +542,7 @@ index 40c8ff86b..e89d95cd1 100644
  
          final boolean blockedRequestByTcf = bidderPrivacyResult.isBlockedRequestByTcf();
          final boolean blockedAnalyticsByTcf = bidderPrivacyResult.isBlockedAnalyticsByTcf();
-@@ -722,7 +740,8 @@ public class ExchangeService {
+@@ -720,7 +738,8 @@ public class ExchangeService {
                  biddersToConfigs,
                  bidderToPrebidBidders,
                  bidderAliases,
@@ -549,7 +552,7 @@ index 40c8ff86b..e89d95cd1 100644
  
          final BidderRequest bidderRequest = BidderRequest.builder()
                  .bidder(bidder)
-@@ -749,7 +768,8 @@ public class ExchangeService {
+@@ -747,7 +766,8 @@ public class ExchangeService {
                                           Map<String, ExtBidderConfigOrtb> biddersToConfigs,
                                           Map<String, JsonNode> bidderToPrebidBidders,
                                           BidderAliases bidderAliases,
@@ -559,7 +562,7 @@ index 40c8ff86b..e89d95cd1 100644
  
          final String bidder = bidderPrivacyResult.getRequestBidder();
          final BidRequest bidRequest = priceFloorProcessor.enrichWithPriceFloors(
-@@ -812,7 +832,7 @@ public class ExchangeService {
+@@ -810,7 +830,7 @@ public class ExchangeService {
                  bidderAliases,
                  context.getDebugWarnings());
  
@@ -568,7 +571,7 @@ index 40c8ff86b..e89d95cd1 100644
                  // User was already prepared above
                  .user(bidderPrivacyResult.getUser())
                  .device(bidderPrivacyResult.getDevice())
-@@ -822,7 +842,7 @@ public class ExchangeService {
+@@ -820,7 +840,7 @@ public class ExchangeService {
                  .site(isSite ? preparedSite : null)
                  .source(prepareSource(bidder, bidRequest, transmitTid))
                  .ext(prepareExt(bidder, bidderToPrebidBidders, bidderToMultiBid, bidRequest.getExt()))
@@ -577,7 +580,7 @@ index 40c8ff86b..e89d95cd1 100644
      }
  
      private static boolean transmitTransactionId(String bidder, AuctionContext context) {
-@@ -1125,12 +1145,24 @@ public class ExchangeService {
+@@ -1111,12 +1131,24 @@ public class ExchangeService {
                      bidderName);
          }
  
@@ -622,7 +625,7 @@ index fc3ee36bd..f6b8f86ab 100644
       * The bidder is called, but its response is rejected.
       * Applied if any other RESPONSE_REJECTED reason is not recognized.
 diff --git a/src/main/java/org/prebid/server/auction/requestfactory/Ortb2RequestFactory.java b/src/main/java/org/prebid/server/auction/requestfactory/Ortb2RequestFactory.java
-index 01c4c8a43..cbe559b4d 100644
+index f76d61316..ddc8bb80b 100644
 --- a/src/main/java/org/prebid/server/auction/requestfactory/Ortb2RequestFactory.java
 +++ b/src/main/java/org/prebid/server/auction/requestfactory/Ortb2RequestFactory.java
 @@ -28,6 +28,7 @@ import org.prebid.server.auction.model.AuctionContext;
@@ -641,7 +644,7 @@ index 01c4c8a43..cbe559b4d 100644
  import org.prebid.server.proto.openrtb.ext.request.ExtPublisher;
  import org.prebid.server.proto.openrtb.ext.request.ExtPublisherPrebid;
  import org.prebid.server.proto.openrtb.ext.request.ExtRegs;
-@@ -247,12 +249,15 @@ public class Ortb2RequestFactory {
+@@ -249,12 +251,15 @@ public class Ortb2RequestFactory {
          final GeoInfo geoInfo = auctionContext.getGeoInfo();
          final Geo geo = ObjectUtil.getIfNotNull(device, Device::getGeo);
  
@@ -660,7 +663,7 @@ index 01c4c8a43..cbe559b4d 100644
  
          final Geo updatedGeo = Optional.ofNullable(geo)
                  .map(Geo::toBuilder)
-@@ -265,6 +270,8 @@ public class Ortb2RequestFactory {
+@@ -267,6 +272,8 @@ public class Ortb2RequestFactory {
                  .map(Device::toBuilder)
                  .orElseGet(Device::builder)
                  .geo(updatedGeo)
@@ -1327,7 +1330,7 @@ index 000000000..11518ab34
 +    }
 +}
 diff --git a/src/main/java/org/prebid/server/cookie/UidsCookieService.java b/src/main/java/org/prebid/server/cookie/UidsCookieService.java
-index 6b608f063..e39da8452 100644
+index 8bfe41488..d51a36fed 100644
 --- a/src/main/java/org/prebid/server/cookie/UidsCookieService.java
 +++ b/src/main/java/org/prebid/server/cookie/UidsCookieService.java
 @@ -5,6 +5,7 @@ import io.vertx.core.http.Cookie;
@@ -1336,9 +1339,9 @@ index 6b608f063..e39da8452 100644
  import org.apache.commons.lang3.StringUtils;
 +import org.prebid.server.bids.EnhancedCookieSync;
  import org.prebid.server.cookie.model.UidWithExpiry;
- import org.prebid.server.cookie.model.UidsCookieUpdateResult;
  import org.prebid.server.cookie.proto.Uids;
-@@ -47,6 +48,7 @@ public class UidsCookieService {
+ import org.prebid.server.json.DecodeException;
+@@ -55,6 +56,7 @@ public class UidsCookieService {
      private final PrioritizedCoopSyncProvider prioritizedCoopSyncProvider;
      private final Metrics metrics;
      private final JacksonMapper mapper;
@@ -1346,7 +1349,7 @@ index 6b608f063..e39da8452 100644
  
      public UidsCookieService(String optOutCookieName,
                               String optOutCookieValue,
-@@ -58,6 +60,35 @@ public class UidsCookieService {
+@@ -67,6 +69,42 @@ public class UidsCookieService {
                               PrioritizedCoopSyncProvider prioritizedCoopSyncProvider,
                               Metrics metrics,
                               JacksonMapper mapper) {
@@ -1355,6 +1358,11 @@ index 6b608f063..e39da8452 100644
 +                    "Configured cookie size is less than allowed minimum size of " + MIN_COOKIE_SIZE_BYTES);
 +        }
 +
++        if (numberOfUidCookies < MIN_NUMBER_OF_UID_COOKIES || numberOfUidCookies > MAX_NUMBER_OF_UID_COOKIES) {
++            throw new IllegalArgumentException(
++                    "Configured number of uid cookies should be in the range from %d to %d"
++                            .formatted(MIN_NUMBER_OF_UID_COOKIES, MAX_NUMBER_OF_UID_COOKIES));
++        }
 +        this.optOutCookieName = optOutCookieName;
 +        this.optOutCookieValue = optOutCookieValue;
 +        this.hostCookieFamily = hostCookieFamily;
@@ -1362,6 +1370,7 @@ index 6b608f063..e39da8452 100644
 +        this.hostCookieDomain = StringUtils.isNotBlank(hostCookieDomain) ? hostCookieDomain : null;
 +        this.ttlSeconds = Duration.ofDays(ttlDays).getSeconds();
 +        this.maxCookieSizeBytes = maxCookieSizeBytes;
++        this.numberOfUidCookies = numberOfUidCookies;
 +        this.prioritizedCoopSyncProvider = Objects.requireNonNull(prioritizedCoopSyncProvider);
 +        this.metrics = Objects.requireNonNull(metrics);
 +        this.mapper = Objects.requireNonNull(mapper);
@@ -1375,6 +1384,7 @@ index 6b608f063..e39da8452 100644
 +                             String hostCookieDomain,
 +                             int ttlDays,
 +                             int maxCookieSizeBytes,
++                             int numberOfUidCookies,
 +                             PrioritizedCoopSyncProvider prioritizedCoopSyncProvider,
 +                             Metrics metrics,
 +                             JacksonMapper mapper,
@@ -1382,7 +1392,7 @@ index 6b608f063..e39da8452 100644
  
          if (maxCookieSizeBytes != 0 && maxCookieSizeBytes < MIN_COOKIE_SIZE_BYTES) {
              throw new IllegalArgumentException(
-@@ -74,6 +105,7 @@ public class UidsCookieService {
+@@ -90,6 +128,7 @@ public class UidsCookieService {
          this.prioritizedCoopSyncProvider = Objects.requireNonNull(prioritizedCoopSyncProvider);
          this.metrics = Objects.requireNonNull(metrics);
          this.mapper = Objects.requireNonNull(mapper);
@@ -1390,7 +1400,7 @@ index 6b608f063..e39da8452 100644
      }
  
      /**
-@@ -93,10 +125,18 @@ public class UidsCookieService {
+@@ -109,10 +148,18 @@ public class UidsCookieService {
       * Note: UIDs will be excluded from resulting {@link UidsCookie} if their value are 'null'.
       */
      public UidsCookie parseFromRequest(RoutingContext routingContext) {
@@ -1759,7 +1769,7 @@ index 60e11195c..ed2a3b801 100644
          respondWithOk(routingContext, eventRequest.getFormat() == EventRequest.Format.image);
      }
 diff --git a/src/main/java/org/prebid/server/handler/SetuidHandler.java b/src/main/java/org/prebid/server/handler/SetuidHandler.java
-index 728285fb0..947226fa8 100644
+index bce568db2..a12e9b95f 100644
 --- a/src/main/java/org/prebid/server/handler/SetuidHandler.java
 +++ b/src/main/java/org/prebid/server/handler/SetuidHandler.java
 @@ -31,6 +31,7 @@ import org.prebid.server.bidder.UsersyncFormat;
@@ -1813,16 +1823,16 @@ index 728285fb0..947226fa8 100644
      }
  
      private static Map<String, Pair<String, UsersyncMethodType>> collectUsersyncers(BidderCatalog bidderCatalog) {
-@@ -330,6 +360,9 @@ public class SetuidHandler implements ApplicationResource {
+@@ -331,6 +361,9 @@ public class SetuidHandler implements ApplicationResource {
  
-         final UidsCookieUpdateResult uidsCookieUpdateResult =
-                 uidsCookieService.updateUidsCookie(setuidContext.getUidsCookie(), bidder, uid);
+         final UpdateResult<UidsCookie> uidsCookieUpdateResult = uidsCookieService.updateUidsCookie(
+                 setuidContext.getUidsCookie(), bidder, uid);
 +        if (enhancedCookieSync != null) {
-+            enhancedCookieSync.updateEnhancedUids(uidsCookieUpdateResult.getUidsCookie(), routingContext);
++            enhancedCookieSync.updateEnhancedUids(uidsCookieUpdateResult.getValue(), routingContext);
 +        }
-         final Cookie updatedUidsCookie = uidsCookieService.toCookie(uidsCookieUpdateResult.getUidsCookie());
-         addCookie(routingContext, updatedUidsCookie);
  
+         uidsCookieService.splitUidsIntoCookies(uidsCookieUpdateResult.getValue())
+                 .forEach(cookie -> addCookie(routingContext, cookie));
 diff --git a/src/main/java/org/prebid/server/proto/openrtb/ext/request/ExtDevice.java b/src/main/java/org/prebid/server/proto/openrtb/ext/request/ExtDevice.java
 index f8036cc61..717faa2e3 100644
 --- a/src/main/java/org/prebid/server/proto/openrtb/ext/request/ExtDevice.java
@@ -2043,7 +2053,7 @@ index d618c36fa..d5efe8ed1 100644
      @ConditionalOnProperty(prefix = "analytics.agma", name = "enabled", havingValue = "true")
      public static class AgmaAnalyticsConfiguration {
 diff --git a/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java b/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
-index deaa76832..b15483edc 100644
+index 24522e4cd..a63017041 100644
 --- a/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
 +++ b/src/main/java/org/prebid/server/spring/config/ServiceConfiguration.java
 @@ -73,6 +73,9 @@ import org.prebid.server.bidder.BidderErrorNotifier;
@@ -2110,8 +2120,8 @@ index deaa76832..b15483edc 100644
      @Bean
      UidsCookieService uidsCookieService(
              @Value("${host-cookie.optout-cookie.name:#{null}}") String optOutCookieName,
-@@ -660,7 +696,8 @@ public class ServiceConfiguration {
-             @Value("${host-cookie.max-cookie-size-bytes}") Integer maxCookieSizeBytes,
+@@ -661,7 +697,8 @@ public class ServiceConfiguration {
+             @Value("${setuid.number-of-uid-cookies:1}") int numberOfUidCookies,
              PrioritizedCoopSyncProvider prioritizedCoopSyncProvider,
              Metrics metrics,
 -            JacksonMapper mapper) {
@@ -2120,8 +2130,8 @@ index deaa76832..b15483edc 100644
  
          return new UidsCookieService(
                  optOutCookieName,
-@@ -672,7 +709,8 @@ public class ServiceConfiguration {
-                 maxCookieSizeBytes,
+@@ -674,7 +711,8 @@ public class ServiceConfiguration {
+                 numberOfUidCookies,
                  prioritizedCoopSyncProvider,
                  metrics,
 -                mapper);
@@ -2130,7 +2140,7 @@ index deaa76832..b15483edc 100644
      }
  
      @Bean
-@@ -862,6 +900,8 @@ public class ServiceConfiguration {
+@@ -868,6 +906,8 @@ public class ServiceConfiguration {
              HttpInteractionLogger httpInteractionLogger,
              PriceFloorAdjuster priceFloorAdjuster,
              PriceFloorProcessor priceFloorProcessor,
@@ -2139,7 +2149,7 @@ index deaa76832..b15483edc 100644
              BidsAdjuster bidsAdjuster,
              Metrics metrics,
              Clock clock,
-@@ -890,6 +930,8 @@ public class ServiceConfiguration {
+@@ -896,6 +936,8 @@ public class ServiceConfiguration {
                  httpInteractionLogger,
                  priceFloorAdjuster,
                  priceFloorProcessor,
